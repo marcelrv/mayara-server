@@ -1327,8 +1327,16 @@ impl SharedControls {
 
     pub fn set_range_units(&self, value: i32) {
         let mut locked = self.controls.write().unwrap();
-        let control = locked.controls.get_mut(&ControlId::RangeUnits).unwrap();
-        let _ = control.set(value as f64, None, None, None);
+        match locked.controls.get_mut(&ControlId::RangeUnits) {
+            Some(control) => {
+                let _ = control.set(value as f64, None, None, None);
+            }
+            None => {
+                if value != locked.default_range_units {
+                    panic!("Cannot set range_units on a radar that has no range units");
+                }
+            }
+        }
     }
 
     pub fn range_units(&self) -> i32 {
