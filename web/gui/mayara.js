@@ -518,31 +518,6 @@ function radarsLoaded(d) {
       van.add(table, RadarEntry(radar));
     });
 
-    // Add action buttons (standalone mode only)
-    if (isStandaloneMode()) {
-      van.add(
-        r,
-        div(
-          { class: "myr_action_buttons" },
-          button(
-            {
-              class: "myr_radar_link myr_radar_link_secondary",
-              onclick: () => showInterfacesPopup(),
-            },
-            "Interfaces"
-          ),
-          a(
-            {
-              href: "recordings.html",
-              class:
-                "myr_radar_link myr_radar_link_secondary myr_strikethrough",
-            },
-            "Recordings"
-          )
-        )
-      );
-    }
-
     // Radar found, poll less frequently
     setTimeout(loadRadars, 15000);
   } else {
@@ -784,6 +759,38 @@ function hideInterfacesPopup() {
   }
 }
 
+function showActionButtons() {
+  if (!isStandaloneMode()) {
+    return;
+  }
+
+  const container = document.getElementById("action_buttons");
+  if (!container) {
+    return;
+  }
+
+  van.add(
+    container,
+    div(
+      { class: "myr_action_buttons" },
+      button(
+        {
+          class: "myr_radar_link myr_radar_link_secondary",
+          onclick: () => showInterfacesPopup(),
+        },
+        "Interfaces"
+      ),
+      a(
+        {
+          href: "recordings.html",
+          class: "myr_radar_link myr_radar_link_secondary myr_strikethrough",
+        },
+        "Recordings"
+      )
+    )
+  );
+}
+
 async function loadRadars() {
   try {
     const radars = await fetchRadars();
@@ -807,6 +814,9 @@ window.onload = async function () {
 
   // Detect mode
   await detectMode();
+
+  // Show action buttons (standalone mode only)
+  showActionButtons();
 
   // Load data
   loadRadars();
