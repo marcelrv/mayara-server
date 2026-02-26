@@ -9,7 +9,6 @@ use std::time::Duration;
 use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
 
 use crate::locator::LocatorAddress;
-use crate::radar::settings::ControlId;
 use crate::radar::{RadarInfo, SharedRadars};
 use crate::util::{PrintableSlice, c_string};
 use crate::{Brand, Cli};
@@ -234,10 +233,6 @@ impl FurunoLocator {
     }
 
     fn found(&self, info: RadarInfo, radars: &SharedRadars, subsys: &SubsystemHandle) {
-        info.controls
-            .set_string(&ControlId::UserName, info.key())
-            .unwrap();
-
         if let Some(mut info) = radars.add(info) {
             // It's new, start the RadarProcessor thread
 
@@ -308,7 +303,7 @@ impl FurunoLocator {
             && report[16] == b'R'
             && report[0..11] == FURUNO_RADAR_REPORT_HEADER
         {
-            self.process_beacon_report(report, from, via, radars)
+            self.process_beacon_report(report, from, via)
         } else if report.len() == 170 {
             self.process_beacon_model_report(report, from, via, radars, subsys)
         } else {
@@ -321,7 +316,6 @@ impl FurunoLocator {
         report: &[u8],
         from: &SocketAddrV4,
         nic_addr: &Ipv4Addr,
-        radars: &SharedRadars,
     ) -> Result<(), io::Error> {
         match deserialize::<FurunoRadarReport>(report) {
             Ok(data) => {
@@ -341,30 +335,9 @@ impl FurunoLocator {
                 if let Some(name) = c_string(&data.name) {
                     let radar_addr: SocketAddrV4 = from.clone();
 
-                    // DRS: spoke data all on a well-known address
-                    let spoke_data_addr: SocketAddrV4 =
-                        SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 2), FURUNO_DATA_PORT);
-
-                    let report_addr: SocketAddrV4 = SocketAddrV4::new(*from.ip(), 0); // Port is set in login_to_radar
-                    let send_command_addr: SocketAddrV4 = report_addr.clone();
-                    let location_info: RadarInfo = RadarInfo::new(
-                        radars,
-                        &self.args,
-                        Brand::Furuno,
-                        None,
-                        Some(name),
-                        64,
-                        FURUNO_SPOKES,
-                        FURUNO_SPOKE_LEN,
-                        radar_addr,
-                        nic_addr.clone(),
-                        spoke_data_addr,
-                        report_addr,
-                        send_command_addr,
-                        |id, tx| settings::new(id, tx, &self.args),
-                        true,
+                    log::debug!(
+                        "Furuno radar '{name}' seen at '{radar_addr} but looking for other report"
                     );
-                    self.half_found.insert(*from, location_info);
                 }
             }
             Err(e) => {
@@ -388,37 +361,59 @@ impl FurunoLocator {
         radars: &SharedRadars,
         subsys: &SubsystemHandle,
     ) -> Result<(), io::Error> {
-        if let Some(mut radar_info) = self.half_found.remove(from) {
-            match deserialize::<FurunoRadarModelReport>(report) {
-                Ok(data) => {
-                    let model = c_string(&data.model);
-                    let serial_no = c_string(&data.serial_no);
-                    log::debug!(
-                        "{}: Furuno model report: {}",
-                        from,
-                        PrintableSlice::new(report)
-                    );
-                    log::debug!("{}: model: {:?}", from, model);
-                    log::debug!("{}: serial_no: {:?}", from, serial_no);
+        match deserialize::<FurunoRadarModelReport>(report) {
+            Ok(data) => {
+                let model = c_string(&data.model);
+                let serial_no = c_string(&data.serial_no);
+                log::debug!(
+                    "{}: Furuno model report: {}",
+                    from,
+                    PrintableSlice::new(report)
+                );
+                log::debug!("{}: model: {:?}", from, model);
+                log::debug!("{}: serial_no: {:?}", from, serial_no);
 
-                    if radar_info.serial_no.is_none() {
-                        radar_info.serial_no = serial_no.map(|s| s.to_string());
-                    }
+                // DRS: spoke data all on a well-known address
+                let spoke_data_addr: SocketAddrV4 =
+                    SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 2), FURUNO_DATA_PORT);
 
-                    if let Some(model) = model {
-                        radar_info.controls.set_model_name(model.to_string());
-                        log::debug!("Furuno model '{}' at {}", model, from);
-                    }
-                    self.found(radar_info, radars, subsys);
-                }
-                Err(e) => {
-                    log::error!(
-                        "{} via {}: Failed to decode Furuno radar report: {}",
-                        from,
-                        nic_addr,
-                        e
+                let report_addr: SocketAddrV4 = SocketAddrV4::new(*from.ip(), 0); // Port is set in login_to_radar
+                let send_command_addr: SocketAddrV4 = report_addr.clone();
+                let radar_info = RadarInfo::new(
+                    radars,
+                    &self.args,
+                    Brand::Furuno,
+                    serial_no,
+                    None, // No A or B after fur<serialno>,
+                    64,
+                    FURUNO_SPOKES,
+                    FURUNO_SPOKE_LEN,
+                    *from,
+                    nic_addr.clone(),
+                    spoke_data_addr,
+                    report_addr,
+                    send_command_addr,
+                    |id, tx| settings::new(id, tx, &self.args),
+                    true,
+                );
+
+                if let Some(model) = model {
+                    radar_info.controls.set_model_name(model.to_string());
+                    radar_info.controls.set_user_name(
+                        format!("{model} {}", serial_no.unwrap_or(""))
+                            .trim()
+                            .to_string(),
                     );
                 }
+                self.found(radar_info, radars, subsys);
+            }
+            Err(e) => {
+                log::error!(
+                    "{} via {}: Failed to decode Furuno radar report: {}",
+                    from,
+                    nic_addr,
+                    e
+                );
             }
         }
 
