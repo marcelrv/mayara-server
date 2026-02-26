@@ -236,13 +236,17 @@ impl FurunoLocator {
         if let Some(mut info) = radars.add(info) {
             // It's new, start the RadarProcessor thread
 
-            let port: u16 = match login_to_radar(info.addr) {
-                Err(e) => {
-                    log::error!("{}: Unable to connect for login: {}", info.key(), e);
-                    radars.remove(&info.key());
-                    return;
+            let port: u16 = if !self.args.replay {
+                match login_to_radar(info.addr) {
+                    Err(e) => {
+                        log::error!("{}: Unable to connect for login: {}", info.key(), e);
+                        radars.remove(&info.key());
+                        return;
+                    }
+                    Ok(p) => p,
                 }
-                Ok(p) => p,
+            } else {
+                FURUNO_DATA_PORT
             };
             if port != info.send_command_addr.port() {
                 // Furuno radars use a single TCP/IP connection to send commands and
@@ -365,13 +369,23 @@ impl FurunoLocator {
             Ok(data) => {
                 let model = c_string(&data.model);
                 let serial_no = c_string(&data.serial_no);
-                log::debug!(
+                log::trace!(
                     "{}: Furuno model report: {}",
                     from,
                     PrintableSlice::new(report)
                 );
                 log::debug!("{}: model: {:?}", from, model);
                 log::debug!("{}: serial_no: {:?}", from, serial_no);
+
+                let model = match model {
+                    Some(t) => t,
+                    None => {
+                        return Ok(());
+                    }
+                };
+                if !(model.starts_with("DRS") || model.starts_with("FAR")) {
+                    return Ok(());
+                }
 
                 // DRS: spoke data all on a well-known address
                 let spoke_data_addr: SocketAddrV4 =
@@ -397,14 +411,13 @@ impl FurunoLocator {
                     true,
                 );
 
-                if let Some(model) = model {
-                    radar_info.controls.set_model_name(model.to_string());
-                    radar_info.controls.set_user_name(
-                        format!("{model} {}", serial_no.unwrap_or(""))
-                            .trim()
-                            .to_string(),
-                    );
-                }
+                radar_info.controls.set_model_name(model.to_string());
+                radar_info.controls.set_user_name(
+                    format!("{model} {}", serial_no.unwrap_or(""))
+                        .trim()
+                        .to_string(),
+                );
+
                 self.found(radar_info, radars, subsys);
             }
             Err(e) => {
