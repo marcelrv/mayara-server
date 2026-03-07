@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_variables)]
 
 use bitflags::bitflags;
+use serde::Serialize;
 use std::{
     cmp::{max, min},
     collections::HashMap,
@@ -8,6 +9,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use strum::{EnumIter, IntoEnumIterator};
+use utoipa::ToSchema;
 
 use kalman::{KalmanFilter, LocalPosition, Polar};
 use ndarray::Array2;
@@ -19,6 +21,62 @@ use crate::{navdata, protos::RadarMessage::radar_message::Spoke, radar::NAUTICAL
 mod arpa;
 mod kalman;
 pub(crate) mod manager;
+
+// ============================================================================
+// Signal K API Types for Target Streaming
+// ============================================================================
+
+/// Signal K compatible target representation for API/WebSocket streaming
+#[derive(Serialize, Clone, Debug, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ArpaTargetApi {
+    /// Target ID (unique within radar)
+    pub id: usize,
+    /// Current status: "tracking", "acquiring", or "lost"
+    pub status: String,
+    /// Target position relative to radar
+    pub position: TargetPositionApi,
+    /// Target motion (course and speed)
+    pub motion: TargetMotionApi,
+    /// Collision danger assessment
+    pub danger: TargetDangerApi,
+    /// How target was acquired: "auto" or "manual"
+    pub acquisition: String,
+}
+
+/// Target position in the API format
+#[derive(Serialize, Clone, Debug, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetPositionApi {
+    /// Bearing from radar in degrees true (0-360)
+    pub bearing: f64,
+    /// Distance from radar in meters
+    pub distance: f64,
+    /// Latitude if available
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latitude: Option<f64>,
+    /// Longitude if available
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub longitude: Option<f64>,
+}
+
+/// Target motion in the API format
+#[derive(Serialize, Clone, Debug, ToSchema)]
+pub struct TargetMotionApi {
+    /// Course over ground in degrees true
+    pub course: f64,
+    /// Speed in m/s
+    pub speed: f64,
+}
+
+/// Collision danger assessment in the API format
+#[derive(Serialize, Clone, Debug, ToSchema)]
+pub struct TargetDangerApi {
+    /// Closest Point of Approach in meters
+    pub cpa: f64,
+    /// Time to CPA in seconds (negative = past)
+    pub tcpa: f64,
+}
 
 const MIN_BLOB_PIXELS: usize = 6; // minimum number of pixels for a valid blob
 const MAX_BLOB_PIXELS: usize = 10000; // maximum blob size (radar interference protection)
@@ -370,6 +428,9 @@ pub struct TargetBuffer {
 
     /// Blobs currently being built as spokes arrive
     blobs_in_progress: Vec<BlobInProgress>,
+
+    /// Broadcast sender for pushing target updates to SignalK stream
+    sk_client_tx: Option<tokio::sync::broadcast::Sender<crate::stream::SignalKDelta>>,
 }
 
 const REFRESH_START_PERCENTAGE: i32 = 25;
@@ -486,6 +547,7 @@ enum Error {
     Lost,
     WeightedContourLengthTooHigh,
     WaitForRefresh,
+    NoHistory,
 }
 
 #[derive(Debug, Clone)]
@@ -575,7 +637,7 @@ impl HistorySpokes {
 
     pub fn pix(&self, doppler: &Doppler, ang: i32, rad: i32) -> bool {
         // Check bounds before casting to usize (negative rad would overflow)
-        if rad < 3 || rad as usize >= self.spokes[0].sweep.len() {
+        if self.spokes.is_empty() || rad < 3 || rad as usize >= self.spokes[0].sweep.len() {
             return false;
         }
         let rad = rad as usize;
@@ -698,10 +760,16 @@ impl HistorySpokes {
         }
         for a in min_angle.angle..=max_angle.angle {
             let a_normalized = self.mod_spokes(a);
+            let spoke_sweep_len = self.spokes[a_normalized].sweep.len();
+            if spoke_sweep_len == 0 {
+                continue;
+            }
             for r in min_r.r..=max_r.r {
-                self.spokes[a_normalized].sweep[r as usize] = self.spokes[a_normalized].sweep
-                    [r as usize]
-                    .intersection(HistoryPixel::NO_TARGET | HistoryPixel::CONTOUR);
+                if r >= 0 && (r as usize) < spoke_sweep_len {
+                    self.spokes[a_normalized].sweep[r as usize] = self.spokes[a_normalized].sweep
+                        [r as usize]
+                        .intersection(HistoryPixel::NO_TARGET | HistoryPixel::CONTOUR);
+                }
             }
         }
         return false;
@@ -799,6 +867,10 @@ impl HistorySpokes {
      *
      */
     fn get_contour(&mut self, doppler: &Doppler, pol: Polar) -> Result<(Contour, Polar), Error> {
+        if self.spokes.is_empty() {
+            return Err(Error::NoHistory);
+        }
+
         let mut pol = pol;
         let mut count = 0;
         let mut current = pol;
@@ -926,6 +998,9 @@ impl HistorySpokes {
         const SHADOW_MARGIN: i32 = 5;
         const TARGET_DISTANCE_FOR_BLANKING_SHADOW: f64 = 6000.; // 6 km
 
+        if self.spokes.is_empty() {
+            return;
+        }
         let sweep_len = self.spokes[0].sweep.len();
         if sweep_len == 0 {
             return;
@@ -935,10 +1010,14 @@ impl HistorySpokes {
             ..=contour.max_angle + DISTANCE_BETWEEN_TARGETS
         {
             let a = self.mod_spokes(a);
+            let spoke_sweep_len = self.spokes[a].sweep.len();
+            if spoke_sweep_len == 0 {
+                continue;
+            }
             for r in max(contour.min_r - DISTANCE_BETWEEN_TARGETS, 0)
                 ..=min(
                     contour.max_r + DISTANCE_BETWEEN_TARGETS,
-                    sweep_len as i32 - 1,
+                    spoke_sweep_len as i32 - 1,
                 )
             {
                 self.spokes[a].sweep[r as usize] =
@@ -957,7 +1036,11 @@ impl HistorySpokes {
             }
             for a in contour.min_angle - SHADOW_MARGIN..=max + SHADOW_MARGIN {
                 let a = self.mod_spokes(a);
-                for r in contour.max_r as usize..=min(4 * contour.max_r as usize, sweep_len - 1) {
+                let spoke_sweep_len = self.spokes[a].sweep.len();
+                if spoke_sweep_len == 0 {
+                    continue;
+                }
+                for r in contour.max_r as usize..=min(4 * contour.max_r as usize, spoke_sweep_len - 1) {
                     self.spokes[a].sweep[r] =
                         self.spokes[a].sweep[r].intersection(HistoryPixel::BACKUP);
                     // also clear both Doppler bits
@@ -969,8 +1052,9 @@ impl HistorySpokes {
         // on the next sweep.
         for p in &contour.contour {
             // Normalize angle (can be negative due to contour tracing) and check r bounds
-            if p.r >= 0 && (p.r as usize) < sweep_len {
-                let angle = self.mod_spokes(p.angle);
+            let angle = self.mod_spokes(p.angle);
+            let spoke_sweep_len = self.spokes[angle].sweep.len();
+            if p.r >= 0 && (p.r as usize) < spoke_sweep_len {
                 self.spokes[angle].sweep[p.r as usize].insert(HistoryPixel::CONTOUR);
             }
         }
@@ -1025,6 +1109,7 @@ impl TargetBuffer {
         stationary: bool,
         info: &RadarInfo,
         shared_manager: Option<manager::SharedTargetManager>,
+        sk_client_tx: Option<tokio::sync::broadcast::Sender<crate::stream::SignalKDelta>>,
     ) -> Self {
         let spokes_per_revolution = info.spokes_per_revolution as i32;
         let spoke_len = info.max_spoke_len as i32;
@@ -1068,6 +1153,28 @@ impl TargetBuffer {
             prev_angle: 0,
 
             blobs_in_progress: Vec::new(),
+
+            sk_client_tx,
+        }
+    }
+
+    /// Broadcast a target update to connected SignalK clients
+    fn broadcast_target_update(&self, target: &ArpaTarget, radar_position: &GeoPosition) {
+        if let Some(ref tx) = self.sk_client_tx {
+            let target_api = target.to_api(radar_position);
+            let mut delta = crate::stream::SignalKDelta::new();
+            delta.add_target_update(&self.radar_key, target.m_target_id, Some(target_api));
+            // Ignore send errors - no receivers is normal when no clients connected
+            let _ = tx.send(delta);
+        }
+    }
+
+    /// Broadcast that a target was lost
+    fn broadcast_target_lost(&self, target_id: usize) {
+        if let Some(ref tx) = self.sk_client_tx {
+            let mut delta = crate::stream::SignalKDelta::new();
+            delta.add_target_update(&self.radar_key, target_id, None);
+            let _ = tx.send(delta);
         }
     }
 
@@ -1415,6 +1522,13 @@ impl TargetBuffer {
             }
         }
 
+        // Broadcast target state to SignalK clients
+        if target.m_status == TargetStatus::LOST {
+            self.broadcast_target_lost(target_id);
+        } else {
+            self.broadcast_target_update(&target, &target.m_radar_pos);
+        }
+
         // Update the target back to storage
         if let Some(ref manager) = self.shared_manager {
             manager.update_target(target_id, target, self.history.spokes[0].time);
@@ -1424,6 +1538,16 @@ impl TargetBuffer {
     }
 
     pub fn delete_all_targets(&mut self) {
+        // Broadcast lost for all targets before deleting
+        let target_ids: Vec<usize> = if let Some(ref manager) = self.shared_manager {
+            manager.get_all_target_ids()
+        } else {
+            self.targets.read().unwrap().keys().copied().collect()
+        };
+        for target_id in target_ids {
+            self.broadcast_target_lost(target_id);
+        }
+
         // In dual radar mode, use shared manager
         if let Some(ref manager) = self.shared_manager {
             manager.delete_all_targets();
@@ -1704,6 +1828,9 @@ impl TargetBuffer {
             target_pos.pos.lat,
             target_pos.pos.lon
         );
+
+        // Broadcast new target to SignalK clients
+        self.broadcast_target_update(&target, &target.m_radar_pos);
 
         // Store to shared manager in dual radar mode, otherwise local storage
         if let Some(ref manager) = self.shared_manager {
@@ -3033,5 +3160,59 @@ impl ArpaTarget {
         self.position.dlat_dt = 0.;
         self.position.dlon_dt = 0.;
         self.position.speed_kn = 0.;
+    }
+
+    /// Convert internal ArpaTarget to Signal K API format for streaming
+    pub fn to_api(&self, radar_position: &GeoPosition) -> ArpaTargetApi {
+        // Calculate bearing and distance from radar to target
+        let dlat = self.position.pos.lat - radar_position.lat;
+        let dlon = (self.position.pos.lon - radar_position.lon)
+            * radar_position.lat.to_radians().cos();
+
+        let distance = (dlat * dlat + dlon * dlon).sqrt() * METERS_PER_DEGREE_LATITUDE;
+        let bearing_rad = dlon.atan2(dlat);
+        let mut bearing = bearing_rad.to_degrees();
+        if bearing < 0.0 {
+            bearing += 360.0;
+        }
+
+        // Calculate course from velocity components
+        let course_rad = self.position.dlon_dt.atan2(self.position.dlat_dt);
+        let mut course = course_rad.to_degrees();
+        if course < 0.0 {
+            course += 360.0;
+        }
+
+        // Speed: convert from knots to m/s
+        let speed_ms = self.position.speed_kn * 0.514444;
+
+        ArpaTargetApi {
+            id: self.m_target_id,
+            status: match self.m_status {
+                TargetStatus::ACTIVE => "tracking".to_string(),
+                TargetStatus::Acquire0
+                | TargetStatus::Acquire1
+                | TargetStatus::Acquire2
+                | TargetStatus::ACQUIRE3 => "acquiring".to_string(),
+                TargetStatus::LOST => "lost".to_string(),
+                _ => "unknown".to_string(),
+            },
+            position: TargetPositionApi {
+                bearing,
+                distance,
+                latitude: Some(self.position.pos.lat),
+                longitude: Some(self.position.pos.lon),
+            },
+            motion: TargetMotionApi { course, speed: speed_ms },
+            danger: TargetDangerApi {
+                cpa: 0.0,  // TODO: implement CPA calculation
+                tcpa: 0.0, // TODO: implement TCPA calculation
+            },
+            acquisition: if self.m_automatic {
+                "auto".to_string()
+            } else {
+                "manual".to_string()
+            },
+        }
     }
 }

@@ -9,7 +9,10 @@ use std::{
     io::ErrorKind,
     net::SocketAddr,
     pin::Pin,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{io::AsyncBufReadExt, net::UdpSocket, time::sleep};
@@ -20,6 +23,7 @@ use tokio_graceful_shutdown::SubsystemHandle;
 use crate::{
     Cli,
     radar::{GeoPosition, RadarError},
+    stream::SignalKDelta,
 };
 
 static HEADING_TRUE: AtomicF64 = AtomicF64::new(f64::NAN);
@@ -28,6 +32,24 @@ static POSITION_LAT: AtomicF64 = AtomicF64::new(f64::NAN);
 static POSITION_LON: AtomicF64 = AtomicF64::new(f64::NAN);
 static COG: AtomicF64 = AtomicF64::new(f64::NAN);
 static SOG: AtomicF64 = AtomicF64::new(f64::NAN);
+
+/// Broadcast sender for navigation updates to GUI clients
+static NAV_BROADCAST_TX: OnceLock<tokio::sync::broadcast::Sender<SignalKDelta>> = OnceLock::new();
+
+/// Initialize the navigation broadcast sender (called once at startup)
+pub fn init_nav_broadcast(tx: tokio::sync::broadcast::Sender<SignalKDelta>) {
+    let _ = NAV_BROADCAST_TX.set(tx);
+}
+
+/// Broadcast a navigation update to subscribed clients
+fn broadcast_nav_update(path: &str, value: f64) {
+    if let Some(tx) = NAV_BROADCAST_TX.get() {
+        let mut delta = SignalKDelta::new();
+        delta.add_navigation_update(path, value);
+        // Ignore send errors (no subscribers)
+        let _ = tx.send(delta);
+    }
+}
 
 ///
 /// Get the heading in radians [0..2*PI>
@@ -45,13 +67,17 @@ pub(crate) fn get_heading_true() -> Option<f64> {
 ///
 pub(crate) fn set_heading_true(heading: Option<f64>) {
     if let Some(h) = heading {
-        HEADING_TRUE.store(h, Ordering::Release);
+        let old = HEADING_TRUE.swap(h, Ordering::AcqRel);
+        // Only broadcast if value changed significantly (> 0.001 rad ~ 0.06 deg)
+        if (old - h).abs() > 0.001 || old.is_nan() {
+            broadcast_nav_update("navigation.headingTrue", h);
+        }
     } else {
         HEADING_TRUE.store(f64::NAN, Ordering::Release);
     }
 }
 
-pub(crate) fn get_radar_position() -> Option<GeoPosition> {
+pub fn get_radar_position() -> Option<GeoPosition> {
     if POSITION_VALID.load(Ordering::Acquire) {
         let lat = POSITION_LAT.load(Ordering::Acquire);
         let lon = POSITION_LON.load(Ordering::Acquire);

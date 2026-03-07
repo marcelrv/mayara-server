@@ -457,7 +457,7 @@ impl SharedRadars {
     }
 
     /// Get or create the shared target manager for dual radar support
-    pub(crate) fn get_target_manager(&self) -> target::manager::SharedTargetManager {
+    pub fn get_target_manager(&self) -> target::manager::SharedTargetManager {
         let mut radars = self.radars.write().unwrap();
         if radars.target_manager.is_none() {
             radars.target_manager = Some(target::manager::SharedTargetManager::new());
@@ -647,6 +647,11 @@ impl SharedRadars {
 
     pub fn new_sk_client_subscription(&self) -> tokio::sync::broadcast::Receiver<SignalKDelta> {
         self.radars.read().unwrap().sk_client_tx.subscribe()
+    }
+
+    /// Get the SignalK delta broadcast sender for pushing target updates
+    pub fn get_sk_client_tx(&self) -> tokio::sync::broadcast::Sender<SignalKDelta> {
+        self.radars.read().unwrap().sk_client_tx.clone()
     }
 
     /// Request all radars to switch to transmit mode
@@ -922,14 +927,14 @@ impl CommonRadar {
         control_update_rx: broadcast::Receiver<ControlUpdate>,
         replay: bool,
     ) -> Self {
-        // Get shared target manager for dual radar support
-        let shared_target_manager = if args.targets == TargetMode::Arpa {
-            Some(radars.get_target_manager())
+        // Get shared target manager and broadcast sender for dual radar support
+        let (shared_target_manager, sk_client_tx) = if args.targets == TargetMode::Arpa {
+            (Some(radars.get_target_manager()), Some(radars.get_sk_client_tx()))
         } else {
-            None
+            (None, None)
         };
 
-        let trails = TrailBuffer::new(args, &info, shared_target_manager);
+        let trails = TrailBuffer::new(args, &info, shared_target_manager, sk_client_tx);
         let spoke_message = None;
 
         let common = CommonRadar {

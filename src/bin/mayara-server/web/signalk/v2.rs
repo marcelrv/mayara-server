@@ -29,7 +29,7 @@ use crate::web::spokes_handler;
 
 use super::super::{Message, Web, WebSocket, WebSocketUpgrade};
 use mayara::{
-    InterfaceApi,
+    InterfaceApi, navdata,
     radar::{
         Legend, RadarError, RadarInfo, SharedRadars,
         settings::{BareControlValue, Control, ControlId, ControlValue, RadarControlValue},
@@ -843,7 +843,7 @@ async fn control_stream_handler(
     ws: WebSocketUpgrade,
 ) -> Response {
     log::debug!(
-        "stream request for \"/signalk/v2/api/vessels/self/radars/stream\" from {} params={:?}",
+        "stream request for \"/signalk/v1/stream\" from {} params={:?}",
         addr,
         params
     );
@@ -926,7 +926,7 @@ async fn ws_signalk_delta(
     let mut meta_radar_data_sent = Vec::new();
 
     log::debug!(
-        "Starting /signalk/v2/api/vessels/self/radars/stream websocket subscribe={:?} send_cached_values={:?}",
+        "Starting /signalk/v1/stream websocket subscribe={:?} send_cached_values={:?}",
         subscribe,
         send_cached_values
     );
@@ -948,6 +948,22 @@ async fn ws_signalk_delta(
             );
 
             sk_delta.add_updates(rcvs);
+        }
+
+        // Send all known ARPA targets to the new client
+        if let Some(radar_position) = navdata::get_radar_position() {
+            let target_manager = radars.get_target_manager();
+            let targets_by_radar = target_manager.get_all_targets_by_radar(&radar_position);
+            let mut target_count = 0;
+            for (radar_key, targets) in targets_by_radar {
+                for (target_id, target_api) in targets {
+                    sk_delta.add_target_update(&radar_key, target_id, Some(target_api));
+                    target_count += 1;
+                }
+            }
+            if target_count > 0 {
+                log::info!("Sending {} ARPA targets to new client", target_count);
+            }
         }
     }
 

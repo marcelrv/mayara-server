@@ -11,7 +11,7 @@ use std::{
 
 use crate::radar::GeoPosition;
 
-use super::{ArpaTarget, Doppler, ExtendedPosition, RefreshState, TargetStatus};
+use super::{ArpaTarget, ArpaTargetApi, Doppler, ExtendedPosition, RefreshState, TargetStatus};
 
 /// Configuration for a radar participating in shared target management
 #[derive(Debug, Clone)]
@@ -61,7 +61,7 @@ struct TargetManagerState {
 /// any of the registered radars. Targets automatically transition to the
 /// radar with the best coverage (smallest range that can see the target).
 #[derive(Clone)]
-pub(crate) struct SharedTargetManager {
+pub struct SharedTargetManager {
     inner: Arc<RwLock<TargetManagerState>>,
 }
 
@@ -365,6 +365,12 @@ impl SharedTargetManager {
         state.targets.clear();
     }
 
+    /// Get all target IDs
+    pub(crate) fn get_all_target_ids(&self) -> Vec<usize> {
+        let state = self.inner.read().unwrap();
+        state.targets.keys().copied().collect()
+    }
+
     /// Clean up lost targets and reset refresh state for the next cycle
     pub(crate) fn cleanup_lost_targets(&self) {
         let mut state = self.inner.write().unwrap();
@@ -420,6 +426,28 @@ impl SharedTargetManager {
     /// Get the long range radar key (largest range)
     pub(crate) fn get_long_range_radar(&self) -> Option<String> {
         self.get_radars_by_range().last().cloned()
+    }
+
+    /// Get all targets grouped by their tracking radar as API representations
+    /// Returns a map of radar_key -> Vec<(target_id, ArpaTargetApi)>
+    pub fn get_all_targets_by_radar(
+        &self,
+        radar_position: &GeoPosition,
+    ) -> std::collections::HashMap<String, Vec<(usize, ArpaTargetApi)>> {
+        let state = self.inner.read().unwrap();
+        let mut result: std::collections::HashMap<String, Vec<(usize, ArpaTargetApi)>> =
+            std::collections::HashMap::new();
+
+        for (id, managed) in &state.targets {
+            if managed.target.m_status != TargetStatus::LOST {
+                result
+                    .entry(managed.tracking_radar.clone())
+                    .or_default()
+                    .push((*id, managed.target.to_api(radar_position)));
+            }
+        }
+
+        result
     }
 }
 

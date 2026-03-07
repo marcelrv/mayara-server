@@ -270,6 +270,9 @@ pub async fn start_session(
     let radars = SharedRadars::new();
     let (tx_interface_request, _) = broadcast::channel(10);
 
+    // Initialize navigation broadcast sender so navdata can push updates to GUI clients
+    navdata::init_nav_broadcast(radars.get_sk_client_tx());
+
     let locator = Locator::new(args.clone(), radars.clone());
 
     let (tx_ip_change, _rx_ip_change) = broadcast::channel(1);

@@ -54,6 +54,7 @@ impl TrailBuffer {
         args: &Cli,
         info: &RadarInfo,
         shared_target_manager: Option<SharedTargetManager>,
+        sk_client_tx: Option<tokio::sync::broadcast::Sender<crate::stream::SignalKDelta>>,
     ) -> Self {
         let spokes_per_revolution = info.spokes_per_revolution as usize;
         let max_spoke_len = info.max_spoke_len as usize;
@@ -69,6 +70,7 @@ impl TrailBuffer {
                 args.stationary,
                 info,
                 shared_target_manager.clone(),
+                sk_client_tx,
             )),
             _ => None,
         };

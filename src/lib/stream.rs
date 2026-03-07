@@ -13,6 +13,7 @@ use wildmatch::WildMatch;
 use crate::{
     PACKAGE,
     radar::settings::{BareControlValue, Control, ControlDefinition, ControlId, RadarControlValue},
+    radar::target::ArpaTargetApi,
     radar::{RadarError, SharedRadars},
 };
 
@@ -56,7 +57,7 @@ impl SignalKDelta {
         let mut meta = false;
         for update in &self.updates {
             for dv in &update.values {
-                let radar_id = dv.path.split('.').nth(1).unwrap();
+                let radar_id = dv.path().split('.').nth(1).unwrap();
                 if meta_sent.iter().any(|x| x == radar_id) {
                     meta = true;
                     break;
@@ -70,6 +71,44 @@ impl SignalKDelta {
 
     pub fn add_updates(&mut self, rcvs: Vec<RadarControlValue>) {
         let delta_update = DeltaUpdate::from(rcvs);
+        self.updates.push(delta_update);
+    }
+
+    /// Add a target update to the delta message.
+    /// - `Some(target)` sends the target data (acquired or updated)
+    /// - `None` indicates the target was lost
+    pub fn add_target_update(
+        &mut self,
+        radar_id: &str,
+        target_id: usize,
+        target: Option<ArpaTargetApi>,
+    ) {
+        let path = format!("radars.{}.targets.{}", radar_id, target_id);
+        let value: serde_json::Value = match target {
+            Some(t) => serde_json::to_value(t).unwrap_or(serde_json::Value::Null),
+            None => serde_json::Value::Null,
+        };
+
+        let delta_update = DeltaUpdate {
+            timestamp: Some(Utc::now()),
+            source: Some(PACKAGE.to_string()),
+            meta: Vec::new(),
+            values: vec![DeltaValue::Target { path, value }],
+        };
+        self.updates.push(delta_update);
+    }
+
+    /// Add a navigation update to the delta message.
+    pub fn add_navigation_update(&mut self, path: &str, value: f64) {
+        let delta_update = DeltaUpdate {
+            timestamp: Some(Utc::now()),
+            source: Some(PACKAGE.to_string()),
+            meta: Vec::new(),
+            values: vec![DeltaValue::Navigation {
+                path: path.to_string(),
+                value,
+            }],
+        };
         self.updates.push(delta_update);
     }
 
@@ -92,8 +131,8 @@ impl SignalKDelta {
         for update in self.updates.iter_mut() {
             update
                 .values
-                .retain(|dv| subscriptions.is_subscribed_path(&dv.path, false));
-        } // Modify the SK delta for the subscriptions active
+                .retain(|dv| subscriptions.is_subscribed_path(dv.path(), false));
+        }
     }
 
     pub fn build(self) -> Option<Self> {
@@ -127,15 +166,43 @@ struct DeltaUpdate {
     values: Vec<DeltaValue>,
 }
 
-/// A single control value update
+/// A single value update (control, target, or navigation)
 #[derive(Serialize, Clone, Debug, ToSchema)]
-#[schema(example = json!({"path": "radars.nav1034A.controls.gain", "value": 50}))]
-struct DeltaValue {
-    /// Full path to the control (e.g., "radars.nav1034A.controls.gain")
-    #[schema(example = "radars.nav1034A.controls.gain")]
-    path: String,
-    /// The control value
-    value: BareControlValue,
+#[serde(untagged)]
+enum DeltaValue {
+    /// Control value update
+    Control {
+        /// Full path to the control (e.g., "radars.nav1034A.controls.gain")
+        #[schema(example = "radars.nav1034A.controls.gain")]
+        path: String,
+        /// The control value
+        #[serde(flatten)]
+        value: BareControlValue,
+    },
+    /// Target update (acquired, updated, or lost)
+    Target {
+        /// Full path to the target (e.g., "radars.nav1034A.targets.1")
+        path: String,
+        /// Target data or null for lost target
+        value: serde_json::Value,
+    },
+    /// Navigation data update
+    Navigation {
+        /// Full path to the navigation data (e.g., "navigation.headingTrue")
+        path: String,
+        /// Navigation value (radians for heading, m/s for speed, etc.)
+        value: f64,
+    },
+}
+
+impl DeltaValue {
+    fn path(&self) -> &str {
+        match self {
+            DeltaValue::Control { path, .. } => path,
+            DeltaValue::Target { path, .. } => path,
+            DeltaValue::Navigation { path, .. } => path,
+        }
+    }
 }
 
 impl DeltaUpdate {
@@ -145,7 +212,7 @@ impl DeltaUpdate {
             let path = radar_control_value.path.to_string();
 
             let value = BareControlValue::from(radar_control_value);
-            values.push(DeltaValue { path, value });
+            values.push(DeltaValue::Control { path, value });
         }
 
         let delta_update = DeltaUpdate {
@@ -209,6 +276,10 @@ pub struct ActiveSubscriptions {
     pub mode: Subscribe,
     timeout: Duration,
     paths: HashMap<String, HashMap<ControlId, PathSubscribe>>,
+    /// Target subscriptions: radar_id -> wildcard pattern (e.g., "targets.*")
+    target_subscriptions: HashMap<String, Vec<String>>,
+    /// Navigation path subscriptions (e.g., "navigation.headingTrue")
+    navigation_subscriptions: Vec<String>,
 }
 
 impl ActiveSubscriptions {
@@ -217,6 +288,8 @@ impl ActiveSubscriptions {
             mode,
             paths: HashMap::new(),
             timeout: Duration::from_secs(99999999),
+            target_subscriptions: HashMap::new(),
+            navigation_subscriptions: Vec::new(),
         }
     }
 
@@ -237,7 +310,34 @@ impl ActiveSubscriptions {
         self.mode = Subscribe::Some;
         let mut period = u64::MAX;
         for path_subscription in subscription.subscribe {
-            let (radar_id, control_id) = extract_path(&path_subscription.path);
+            let path = &path_subscription.path;
+
+            // Handle navigation subscriptions (e.g., "navigation.headingTrue")
+            if path.starts_with("navigation.") {
+                log::debug!("Subscribing to navigation path: {}", path);
+                if !self.navigation_subscriptions.contains(path) {
+                    self.navigation_subscriptions.push(path.clone());
+                }
+                continue;
+            }
+
+            // Handle target subscriptions (e.g., "radars.nav1.targets.*")
+            if path.contains(".targets.") {
+                let (radar_id, target_pattern) = extract_path(path);
+                log::debug!(
+                    "Subscribing to targets for radar '{}' pattern '{}'",
+                    radar_id,
+                    target_pattern
+                );
+                self.target_subscriptions
+                    .entry(radar_id.to_string())
+                    .or_default()
+                    .push(target_pattern.to_string());
+                continue;
+            }
+
+            // Handle control subscriptions (existing logic)
+            let (radar_id, control_id) = extract_path(path);
             let mut paths = self.paths.get_mut(radar_id);
             if paths.is_none() {
                 log::debug!("Creating radar '{}' self", radar_id);
@@ -391,6 +491,18 @@ impl ActiveSubscriptions {
             }
             Subscribe::Some => {}
         }
+
+        // Handle navigation paths (e.g., "navigation.headingTrue")
+        if path.starts_with("navigation.") {
+            return self.is_subscribed_navigation_path(path);
+        }
+
+        // Handle target paths (e.g., "radars.nav1.targets.5")
+        if path.contains(".targets.") {
+            return self.is_subscribed_target_path(path);
+        }
+
+        // Handle control paths (existing logic)
         let (radar_id, control_id) = extract_path(path);
         let control_id = match ControlId::from_str(control_id) {
             Ok(c) => c,
@@ -436,6 +548,48 @@ impl ActiveSubscriptions {
         }
 
         return false;
+    }
+
+    /// Check if subscribed to a navigation path
+    fn is_subscribed_navigation_path(&self, path: &str) -> bool {
+        for subscribed_path in &self.navigation_subscriptions {
+            if subscribed_path == path {
+                return true;
+            }
+            // Support wildcard matching (e.g., "navigation.*")
+            if subscribed_path.contains('*') {
+                let matcher = WildMatch::new(subscribed_path);
+                if matcher.matches(path) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if subscribed to a target path
+    fn is_subscribed_target_path(&self, path: &str) -> bool {
+        // Extract radar_id and target part from path like "radars.nav1.targets.5"
+        let (radar_id, target_part) = extract_path(path);
+
+        // Check both specific radar and wildcard subscriptions
+        for key in [radar_id, "*"] {
+            if let Some(patterns) = self.target_subscriptions.get(key) {
+                for pattern in patterns {
+                    if pattern == target_part {
+                        return true;
+                    }
+                    // Support wildcard matching (e.g., "targets.*" matches "targets.5")
+                    if pattern.contains('*') {
+                        let matcher = WildMatch::new(pattern);
+                        if matcher.matches(target_part) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 }
 
