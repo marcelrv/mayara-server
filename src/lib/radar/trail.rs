@@ -178,8 +178,12 @@ impl TrailBuffer {
             }
             ControlId::MergeTargets => {
                 let merge_enabled = cv.as_bool()?;
+
                 // Clear all targets when toggling merge mode
                 self.targets.as_mut().map(|t| t.delete_all_targets());
+
+                // Enable/disable target merging in the target buffer
+                self.targets.as_mut().map(|t| t.set_merge_targets(merge_enabled));
 
                 // Store the value
                 let v = cv.as_value()?;

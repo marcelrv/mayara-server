@@ -307,6 +307,9 @@ pub struct TargetBuffer {
 
     /// Shared target manager for dual radar coordination (None for single radar)
     shared_manager: Option<manager::SharedTargetManager>,
+    /// Whether to use the shared manager for target merging across radars
+    /// When false, uses local storage even if shared_manager is available
+    merge_targets_enabled: bool,
     /// Key identifying this radar
     radar_key: String,
 
@@ -961,12 +964,32 @@ impl TargetBuffer {
             refreshed_angle: -1,
 
             shared_manager,
+            merge_targets_enabled: false, // Disabled by default, enabled via MergeTargets control
             radar_key,
 
             arpa_detector: ArpaDetector::new(spokes_per_revolution),
 
             sk_client_tx,
         }
+    }
+
+    /// Enable or disable target merging across multiple radars
+    /// When enabled and a shared_manager is available, targets are stored in
+    /// the shared manager and can be tracked by any radar with coverage.
+    /// When disabled, targets are stored locally per-radar.
+    pub fn set_merge_targets(&mut self, enabled: bool) {
+        self.merge_targets_enabled = enabled;
+        log::info!(
+            "Target merging {}: shared_manager={}",
+            if enabled { "enabled" } else { "disabled" },
+            self.shared_manager.is_some()
+        );
+    }
+
+    /// Check if we should use the shared target manager
+    /// Returns true only if both merging is enabled AND a shared manager exists
+    fn use_shared_manager(&self) -> bool {
+        self.merge_targets_enabled && self.shared_manager.is_some()
     }
 
     /// Broadcast a target update to connected SignalK clients
@@ -1097,16 +1120,18 @@ impl TargetBuffer {
 
     /// Delete the target that is closest to the position
     fn delete_target(&mut self, pos: &GeoPosition) {
-        // In dual radar mode, use shared manager
-        if let Some(ref manager) = self.shared_manager {
-            if manager.delete_target_near(pos).is_none() {
-                log::debug!(
-                    "Could not find (M)ARPA target to delete within 1000 meters from {}",
-                    pos
-                );
+        // Use shared manager only if merging is enabled
+        if self.use_shared_manager() {
+            if let Some(ref manager) = self.shared_manager {
+                if manager.delete_target_near(pos).is_none() {
+                    log::debug!(
+                        "Could not find (M)ARPA target to delete within 1000 meters from {}",
+                        pos
+                    );
+                }
             }
         } else {
-            // Single radar mode - use local storage
+            // Local storage mode
             if let Some(id) = self.find_target_id_by_position(pos) {
                 self.targets.write().unwrap().remove(&id);
             } else {
@@ -1132,26 +1157,57 @@ impl TargetBuffer {
 
         log::debug!("Adding (M)ARPA target at {}", target_pos.pos);
 
-        // In dual radar mode, use shared manager for target storage
-        if let Some(ref manager) = self.shared_manager {
-            manager.acquire_target(
-                &self.radar_key,
-                target_pos,
-                Doppler::Any,
-                self.setup.spokes_per_revolution as usize,
-                self.setup.have_doppler,
-            );
+        // Use shared manager only if merging is enabled
+        if self.use_shared_manager() {
+            if let Some(ref manager) = self.shared_manager {
+                manager.acquire_target(
+                    &self.radar_key,
+                    target_pos,
+                    Doppler::Any,
+                    self.setup.spokes_per_revolution as usize,
+                    self.setup.have_doppler,
+                );
+            }
         } else {
-            // Single radar mode - use local storage
+            // Local storage mode
             let id = self.get_next_target_id();
+
+            // Get current radar position for calculating polar coordinates
+            let radar_pos = crate::navdata::get_radar_position().unwrap_or(GeoPosition::new(0., 0.));
+
             let mut target = ArpaTarget::new(
-                target_pos,
-                GeoPosition::new(0., 0.),
+                target_pos.clone(),
+                radar_pos.clone(),
                 id,
                 self.setup.spokes_per_revolution as usize,
                 status,
                 self.setup.have_doppler,
             );
+
+            // Calculate polar coordinates so refresh can find the target
+            // This is critical - without proper polar coords, the target won't be found
+            if self.setup.pixels_per_meter > 0.0 {
+                let own_pos = ExtendedPosition::new(radar_pos, 0., 0., target_pos.time, 0., 0.);
+                let polar = self.setup.pos2polar(&target_pos, &own_pos);
+                target.contour.position = polar.clone();
+                target.expected = polar.clone();
+
+                log::info!(
+                    "MARPA target {} acquired: polar angle={}, r={}, lat={:.6}, lon={:.6}",
+                    id,
+                    polar.angle,
+                    polar.r,
+                    target_pos.pos.lat,
+                    target_pos.pos.lon
+                );
+            } else {
+                log::warn!(
+                    "MARPA target {} acquired without valid pixels_per_meter ({}), tracking may fail",
+                    id,
+                    self.setup.pixels_per_meter
+                );
+            }
+
             target.source_radar = self.radar_key.clone();
             target.tracking_radar = self.radar_key.clone();
             self.targets.write().unwrap().insert(id, target);
@@ -1159,12 +1215,14 @@ impl TargetBuffer {
     }
 
     fn cleanup_lost_targets(&mut self) {
-        // In dual radar mode, cleanup via shared manager
-        if let Some(ref manager) = self.shared_manager {
-            manager.cleanup_lost_targets();
+        // Cleanup via shared manager if merging is enabled
+        if self.use_shared_manager() {
+            if let Some(ref manager) = self.shared_manager {
+                manager.cleanup_lost_targets();
+            }
         }
 
-        // Also cleanup local targets
+        // Always cleanup local targets too
         self.targets
             .write()
             .unwrap()
@@ -1222,55 +1280,58 @@ impl TargetBuffer {
         let search_radius =
             (speed * rotation_ms as f64 * self.setup.pixels_per_meter / 1000.) as i32;
 
-        // In dual radar mode, get targets assigned to this radar from shared manager
-        if let Some(ref manager) = self.shared_manager {
-            let targets_for_radar = manager.get_targets_for_radar(&self.radar_key);
-            log::debug!(
-                "refresh_all_arpa_targets: shared manager mode, {} targets for radar {}",
-                targets_for_radar.len(),
-                self.radar_key
-            );
-            for (target_id, target) in targets_for_radar {
-                self.refresh_single_target(
-                    target_id,
-                    target,
-                    start_angle,
-                    end_angle,
-                    search_radius,
-                );
-            }
-        } else {
-            // Single radar mode - use local storage
-            let target_ids: Vec<usize> = self.targets.read().unwrap().keys().cloned().collect();
-            log::debug!(
-                "refresh_all_arpa_targets: single radar mode, {} target_ids: {:?}",
-                target_ids.len(),
-                target_ids
-            );
-            for target_id in target_ids {
-                let target = {
-                    let targets = self.targets.read().unwrap();
-                    match targets.get(&target_id) {
-                        Some(t) => t.clone(),
-                        None => {
-                            log::debug!("Target {} not found in storage", target_id);
-                            continue;
-                        }
-                    }
-                };
+        // Use shared manager for targets if merging is enabled
+        if self.use_shared_manager() {
+            if let Some(ref manager) = self.shared_manager {
+                let targets_for_radar = manager.get_targets_for_radar(&self.radar_key);
                 log::debug!(
-                    "Processing local target {} at angle {}",
-                    target_id,
-                    target.contour.position.angle
+                    "refresh_all_arpa_targets: shared manager mode, {} targets for radar {}",
+                    targets_for_radar.len(),
+                    self.radar_key
                 );
-                self.refresh_single_target(
-                    target_id,
-                    target,
-                    start_angle,
-                    end_angle,
-                    search_radius,
-                );
+                for (target_id, target) in targets_for_radar {
+                    self.refresh_single_target(
+                        target_id,
+                        target,
+                        start_angle,
+                        end_angle,
+                        search_radius,
+                    );
+                }
+                return;
             }
+        }
+
+        // Local storage mode
+        let target_ids: Vec<usize> = self.targets.read().unwrap().keys().cloned().collect();
+        log::debug!(
+            "refresh_all_arpa_targets: local mode, {} target_ids: {:?}",
+            target_ids.len(),
+            target_ids
+        );
+        for target_id in target_ids {
+            let target = {
+                let targets = self.targets.read().unwrap();
+                match targets.get(&target_id) {
+                    Some(t) => t.clone(),
+                    None => {
+                        log::debug!("Target {} not found in storage", target_id);
+                        continue;
+                    }
+                }
+            };
+            log::debug!(
+                "Processing local target {} at angle {}",
+                target_id,
+                target.contour.position.angle
+            );
+            self.refresh_single_target(
+                target_id,
+                target,
+                start_angle,
+                end_angle,
+                search_radius,
+            );
         }
     }
 
@@ -1361,8 +1422,10 @@ impl TargetBuffer {
         }
 
         // Update the target back to storage
-        if let Some(ref manager) = self.shared_manager {
-            manager.update_target(target_id, target, self.history.spokes[0].time);
+        if self.use_shared_manager() {
+            if let Some(ref manager) = self.shared_manager {
+                manager.update_target(target_id, target, self.history.spokes[0].time);
+            }
         } else {
             self.targets.write().unwrap().insert(target_id, target);
         }
@@ -1370,8 +1433,11 @@ impl TargetBuffer {
 
     pub fn delete_all_targets(&mut self) {
         // Broadcast lost for all targets before deleting
-        let target_ids: Vec<usize> = if let Some(ref manager) = self.shared_manager {
-            manager.get_all_target_ids()
+        let target_ids: Vec<usize> = if self.use_shared_manager() {
+            self.shared_manager
+                .as_ref()
+                .map(|m| m.get_all_target_ids())
+                .unwrap_or_default()
         } else {
             self.targets.read().unwrap().keys().copied().collect()
         };
@@ -1379,9 +1445,11 @@ impl TargetBuffer {
             self.broadcast_target_lost(target_id);
         }
 
-        // In dual radar mode, use shared manager
-        if let Some(ref manager) = self.shared_manager {
-            manager.delete_all_targets();
+        // Use shared manager if merging is enabled
+        if self.use_shared_manager() {
+            if let Some(ref manager) = self.shared_manager {
+                manager.delete_all_targets();
+            }
         }
         // Always clear local storage too
         self.targets.write().unwrap().clear();
@@ -1667,9 +1735,11 @@ impl TargetBuffer {
         // Broadcast new target to SignalK clients
         self.broadcast_target_update(&target, &target.radar_pos);
 
-        // Store to shared manager in dual radar mode, otherwise local storage
-        if let Some(ref manager) = self.shared_manager {
-            manager.add_target(uid, target, &self.radar_key);
+        // Store to shared manager if merging is enabled, otherwise local storage
+        if self.use_shared_manager() {
+            if let Some(ref manager) = self.shared_manager {
+                manager.add_target(uid, target, &self.radar_key);
+            }
         } else {
             self.targets.write().unwrap().insert(uid, target);
         }
@@ -1679,8 +1749,11 @@ impl TargetBuffer {
     /// We look for targets a while back, so one quarter rotation ago.
     /// Get the number of targets currently being tracked
     fn target_count(&self) -> usize {
-        if let Some(ref manager) = self.shared_manager {
-            manager.target_count()
+        if self.use_shared_manager() {
+            self.shared_manager
+                .as_ref()
+                .map(|m| m.target_count())
+                .unwrap_or(0)
         } else {
             self.targets.read().unwrap().len()
         }
@@ -1895,19 +1968,31 @@ impl TargetBuffer {
 
         let (center_angle, center_r) = blob.center();
         let spokes = self.setup.spokes_per_revolution;
-        let heading = self.arpa_detector.current_heading;
+
+        // Use the heading from when the blob was first detected, not the current heading
+        // This ensures consistent guard zone validation since the blob's pixels were
+        // verified against guard zones using this heading when they were collected
+        let heading = blob.start_heading;
 
         // Determine which guard zone (if any) contains this blob
         let source_zone = self
             .arpa_detector
             .get_containing_zone(center_angle, center_r, heading, spokes);
 
-        // Verify blob is within a guard zone
+        // Verify blob is within a guard zone - this should always pass since pixels
+        // were filtered by guard zone during collection, but log details if it fails
         if source_zone == 0 {
+            let current_heading = self.arpa_detector.current_heading;
             log::warn!(
-                "Blob outside guard zones! center=({}, {})",
+                "Blob outside guard zones! center=({}, {}), start_heading={}, current_heading={}, zone0={:?}, zone1={:?}",
                 center_angle,
-                center_r
+                center_r,
+                heading,
+                current_heading,
+                (self.arpa_detector.guard_zones[0].start_angle, self.arpa_detector.guard_zones[0].end_angle,
+                 self.arpa_detector.guard_zones[0].inner_range, self.arpa_detector.guard_zones[0].outer_range),
+                (self.arpa_detector.guard_zones[1].start_angle, self.arpa_detector.guard_zones[1].end_angle,
+                 self.arpa_detector.guard_zones[1].inner_range, self.arpa_detector.guard_zones[1].outer_range)
             );
             return;
         }

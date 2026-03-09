@@ -90,13 +90,23 @@ impl DetectionGuardZone {
         self.inner_range = (self.config_inner_range_m * pixels_per_meter).max(1.0) as i32;
         self.outer_range = (self.config_outer_range_m * pixels_per_meter) as i32;
 
+        // Calculate implied radar range (assuming 1024 pixels per spoke)
+        let implied_range_m = if pixels_per_meter > 0.0 {
+            1024.0 / pixels_per_meter
+        } else {
+            0.0
+        };
+
         log::info!(
-            "GuardZone configured: angles={}..{} spokes, range={}..{} pixels (ppm={})",
+            "GuardZone configured: angles={}..{} spokes, range={}..{} pixels (config {}..{}m, ppm={:.4}, radar_range={:.0}m)",
             self.start_angle,
             self.end_angle,
             self.inner_range,
             self.outer_range,
-            pixels_per_meter
+            self.config_inner_range_m,
+            self.config_outer_range_m,
+            pixels_per_meter,
+            implied_range_m
         );
     }
 
@@ -122,7 +132,17 @@ impl DetectionGuardZone {
 
     /// Check if a range (in pixels) is within this guard zone
     fn contains_range(&self, range: i32) -> bool {
-        self.enabled && range >= self.inner_range && range <= self.outer_range
+        let in_range = self.enabled && range >= self.inner_range && range <= self.outer_range;
+        // Log when a range check fails near the outer boundary
+        if self.enabled && !in_range && range > self.outer_range && range <= self.outer_range + 50 {
+            log::trace!(
+                "Range {} just outside outer boundary {} (inner={})",
+                range,
+                self.outer_range,
+                self.inner_range
+            );
+        }
+        in_range
     }
 
     /// Check if a position is within the guard zone
@@ -162,10 +182,12 @@ pub(crate) struct BlobInProgress {
     pub(crate) start_time: u64,
     /// Own ship position when blob started
     pub(crate) start_pos: GeoPosition,
+    /// Heading when blob was first detected (for guard zone validation)
+    pub(crate) start_heading: i32,
 }
 
 impl BlobInProgress {
-    pub(crate) fn new(angle: i32, r: i32, time: u64, pos: GeoPosition) -> Self {
+    pub(crate) fn new(angle: i32, r: i32, time: u64, pos: GeoPosition, heading: i32) -> Self {
         Self {
             last_spoke_ranges: vec![r],
             last_angle: angle,
@@ -176,6 +198,7 @@ impl BlobInProgress {
             pixel_count: 1,
             start_time: time,
             start_pos: pos,
+            start_heading: heading,
         }
     }
 
@@ -351,6 +374,23 @@ impl ArpaDetector {
         let mut runs: Vec<Vec<i32>> = Vec::new();
         let mut current_run: Vec<i32> = Vec::new();
 
+        // Log guard zone range checking periodically (every 256 angles, on first strong pixel)
+        if angle % 256 == 0 && !strong_pixels.is_empty() {
+            let first_r = strong_pixels[0];
+            let last_r = *strong_pixels.last().unwrap();
+            log::debug!(
+                "GZ range check: spoke pixels {}..{}, gz0 range={}..{} ({}), gz1 range={}..{} ({})",
+                first_r,
+                last_r,
+                self.guard_zones[0].inner_range,
+                self.guard_zones[0].outer_range,
+                if self.guard_zones[0].enabled { "on" } else { "off" },
+                self.guard_zones[1].inner_range,
+                self.guard_zones[1].outer_range,
+                if self.guard_zones[1].enabled { "on" } else { "off" }
+            );
+        }
+
         for &r in strong_pixels {
             // Check if pixel is in a guard zone
             let in_zone = self.guard_zones[0].contains(angle, r, spokes, heading)
@@ -446,7 +486,8 @@ impl ArpaDetector {
                 continue;
             }
             // Create a new blob with all pixels in this run
-            let mut blob = BlobInProgress::new(angle, run[0], time, pos.clone());
+            // Store heading so we can validate guard zone membership when blob completes
+            let mut blob = BlobInProgress::new(angle, run[0], time, pos.clone(), heading);
             for &r in run.iter().skip(1) {
                 blob.add_pixel(angle, r);
                 blob.push_last_spoke_range(r);
