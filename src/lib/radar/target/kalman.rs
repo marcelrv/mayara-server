@@ -1,6 +1,7 @@
 use nalgebra::{SMatrix, SVector};
-use std::{f64::consts::PI, ops::Add};
+use std::f64::consts::PI;
 
+use super::spoke_coords::SpokeBearing;
 use crate::radar::GeoPosition;
 
 // NOISE controls how quickly targets can change heading in the Kalman filter.
@@ -17,44 +18,79 @@ type Matrix4x4 = SMatrix<f64, 4, 4>;
 type Matrix4x2 = SMatrix<f64, 4, 2>;
 type Matrix2x4 = SMatrix<f64, 2, 4>;
 
+/// Polar coordinates relative to True North (geographic bearing).
+/// The bearing is measured from True North (0 = North), clockwise.
 #[derive(Debug, Clone, Copy)]
 pub struct Polar {
-    pub angle: i32,
+    /// Bearing relative to True North in spokes
+    pub bearing: SpokeBearing,
+    /// Range in pixels
     pub r: i32,
-    pub time: u64, // time of measurement
+    /// Time of measurement
+    pub time: u64,
 }
 
 impl Polar {
-    pub fn new(angle: i32, r: i32, time: u64) -> Self {
-        Polar { angle, r, time }
+    pub fn new(bearing: SpokeBearing, r: i32, time: u64) -> Self {
+        Polar { bearing, r, time }
     }
 
-    pub fn angle_in_rad(&self, spokes_per_revolution: f64) -> f64 {
-        self.angle as f64 * 2.0 * PI / spokes_per_revolution
+    /// Create a Polar from raw values (for backward compatibility during migration)
+    pub fn from_raw(bearing: i32, r: i32, time: u64, spokes: u32) -> Self {
+        Polar {
+            bearing: SpokeBearing::new(bearing, spokes),
+            r,
+            time,
+        }
     }
 
-    // Is the polar angle between start and end, where
-    // start and end are normalized on some polar angle [0..n>.
-    pub fn angle_is_between(&self, start: i32, end: i32) -> bool {
+    /// Create a zero Polar (bearing=0, r=0, time=0)
+    pub fn zero() -> Self {
+        Polar {
+            bearing: SpokeBearing::from_raw(0),
+            r: 0,
+            time: 0,
+        }
+    }
+
+    /// Get bearing in radians [0, 2π)
+    pub fn bearing_in_rad(&self, spokes_per_revolution: f64) -> f64 {
+        self.bearing.to_radians(spokes_per_revolution as u32)
+    }
+
+    /// Check if bearing is between start and end (inclusive for start, exclusive for end)
+    pub fn bearing_is_between(&self, start: SpokeBearing, end: SpokeBearing, spokes: u32) -> bool {
+        let bearing = self.bearing.raw().rem_euclid(spokes);
+        let start = start.raw().rem_euclid(spokes);
+        let end = end.raw().rem_euclid(spokes);
+
         if start <= end {
             // Normal case: no wrap-around
-            self.angle >= start && self.angle < end
+            bearing >= start && bearing < end
         } else {
             // Wrap-around case: range spans 0 (e.g., 1812..276 means 1812..2048 and 0..276)
-            self.angle >= start || self.angle < end
+            bearing >= start || bearing < end
         }
     }
-}
 
-impl Add for Polar {
-    type Output = Self;
+    // === Raw access methods for contour tracing (temporary during migration) ===
 
-    fn add(self, other: Self) -> Self {
-        Polar {
-            angle: self.angle + other.angle,
-            r: self.r + other.r,
-            time: self.time + other.time,
-        }
+    /// Get bearing as raw i32 (for contour tracing code)
+    #[inline]
+    pub fn raw_bearing(&self) -> i32 {
+        self.bearing.as_i32()
+    }
+
+    /// Set bearing from raw i32 (for contour tracing code)
+    #[inline]
+    pub fn set_raw_bearing(&mut self, value: i32, spokes: u32) {
+        self.bearing = SpokeBearing::new(value, spokes);
+    }
+
+    /// Add an offset to bearing (for contour tracing code)
+    #[inline]
+    pub fn add_bearing(&mut self, offset: i32, spokes: u32) {
+        self.bearing = self.bearing.add(offset, spokes);
     }
 }
 
@@ -239,13 +275,10 @@ impl KalmanFilter {
 
         self.ht = self.h.transpose();
 
-        let mut a = (pol.angle - expected.angle) as f64; // Z is  difference between measured and expected
-        if a > self.spokes_per_revolution / 2. {
-            a -= self.spokes_per_revolution;
-        }
-        if a < -self.spokes_per_revolution / 2. {
-            a += self.spokes_per_revolution;
-        }
+        // Z is difference between measured and expected bearing
+        let a = expected
+            .bearing
+            .diff(&pol.bearing, self.spokes_per_revolution as u32) as f64;
         let b = (pol.r - expected.r) as f64;
         let z = SMatrix::<f64, 2, 1>::new(a, b);
 

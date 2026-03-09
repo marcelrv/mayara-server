@@ -21,6 +21,9 @@ use crate::{navdata, protos::RadarMessage::radar_message::Spoke, radar::NAUTICAL
 mod arpa;
 mod kalman;
 pub(crate) mod manager;
+pub(crate) mod spoke_coords;
+
+pub(crate) use spoke_coords::{SpokeBearing, SpokeHeading};
 
 // ============================================================================
 // Signal K API Types for Target Streaming
@@ -36,9 +39,11 @@ pub struct ArpaTargetApi {
     pub status: String,
     /// Target position relative to radar
     pub position: TargetPositionApi,
-    /// Target motion (course and speed)
+    /// Target motion (course and speed) - omitted if both values are zero
+    #[serde(skip_serializing_if = "TargetMotionApi::is_zero")]
     pub motion: TargetMotionApi,
-    /// Collision danger assessment
+    /// Collision danger assessment - omitted if both values are zero
+    #[serde(skip_serializing_if = "TargetDangerApi::is_zero")]
     pub danger: TargetDangerApi,
     /// How target was acquired: "auto" or "manual"
     pub acquisition: String,
@@ -53,8 +58,8 @@ pub struct ArpaTargetApi {
 pub struct TargetPositionApi {
     /// Bearing from radar in radians true [0, 2π)
     pub bearing: f64,
-    /// Distance from radar in meters
-    pub distance: f64,
+    /// Distance from radar in meters (rounded to whole meters)
+    pub distance: i32,
     /// Latitude if available
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latitude: Option<f64>,
@@ -72,6 +77,12 @@ pub struct TargetMotionApi {
     pub speed: f64,
 }
 
+impl TargetMotionApi {
+    fn is_zero(&self) -> bool {
+        self.course == 0.0 && self.speed == 0.0
+    }
+}
+
 /// Collision danger assessment in the API format
 #[derive(Serialize, Clone, Debug, ToSchema)]
 pub struct TargetDangerApi {
@@ -79,6 +90,12 @@ pub struct TargetDangerApi {
     pub cpa: f64,
     /// Time to CPA in seconds (negative = past)
     pub tcpa: f64,
+}
+
+impl TargetDangerApi {
+    fn is_zero(&self) -> bool {
+        self.cpa == 0.0 && self.tcpa == 0.0
+    }
 }
 
 const MIN_BLOB_PIXELS: usize = 32; // minimum number of pixels for a valid blob
@@ -217,28 +234,21 @@ pub(crate) enum Doppler {
     AnyPlus,        // will also check bits that have been cleared
 }
 
-const FOUR_DIRECTIONS: [Polar; 4] = [
-    Polar {
-        angle: 0,
-        r: 1,
-        time: 0,
-    },
-    Polar {
-        angle: 1,
-        r: 0,
-        time: 0,
-    },
-    Polar {
-        angle: 0,
-        r: -1,
-        time: 0,
-    },
-    Polar {
-        angle: -1,
-        r: 0,
-        time: 0,
-    },
+/// Directional offsets for contour tracing: (bearing_offset, r_offset)
+const FOUR_DIRECTIONS: [(i32, i32); 4] = [
+    (0, 1),   // Up (increase r)
+    (1, 0),   // Right (increase bearing)
+    (0, -1),  // Down (decrease r)
+    (-1, 0),  // Left (decrease bearing)
 ];
+
+/// A point used for contour tracing, with raw bearing and range values.
+/// Unlike Polar, this is not normalized and allows negative values during tracing.
+#[derive(Debug, Clone, Copy)]
+struct ContourPoint {
+    bearing: i32,
+    r: i32,
+}
 
 bitflags! {
     /// Represents a set of flags.
@@ -341,8 +351,10 @@ pub(self) struct TargetSetup {
 #[derive(Debug, Clone)]
 pub(crate) struct Contour {
     pub(crate) length: i32,
-    min_angle: i32,
-    max_angle: i32,
+    /// Minimum bearing (geographic, relative to North) in raw spoke units
+    min_bearing: i32,
+    /// Maximum bearing (geographic, relative to North) in raw spoke units
+    max_bearing: i32,
     min_r: i32,
     max_r: i32,
     pub(crate) position: Polar,
@@ -496,12 +508,12 @@ impl HistorySpokes {
             return false;
         }
         let length = MIN_CONTOUR_LENGTH;
-        let start = Polar::new(ang as i32, rad as i32, 0);
+        let start = ContourPoint { bearing: ang, r: rad };
 
         let mut current = start; // the 4 possible translations to move from a point on the contour to the next
 
-        let mut max_angle = current;
-        let mut min_angle = current;
+        let mut max_bearing = current;
+        let mut min_bearing = current;
         let mut max_r = current;
         let mut min_r = current;
         let mut count = 0;
@@ -513,8 +525,8 @@ impl HistorySpokes {
             for i in 0..4 {
                 if !self.pix(
                     doppler,
-                    current.angle + FOUR_DIRECTIONS[i].angle,
-                    current.r + FOUR_DIRECTIONS[i].r,
+                    current.bearing + FOUR_DIRECTIONS[i].0,
+                    current.r + FOUR_DIRECTIONS[i].1,
                 ) {
                     found = true;
                     break;
@@ -528,7 +540,7 @@ impl HistorySpokes {
         };
         let mut index = (index + 1) % 4; // determines starting direction
 
-        while current.r != start.r || current.angle != start.angle || count == 0 {
+        while current.r != start.r || current.bearing != start.bearing || count == 0 {
             // Safeguard against infinite loops
             if count > MAX_CONTOUR_LENGTH {
                 return false;
@@ -541,8 +553,8 @@ impl HistorySpokes {
             for _ in 0..4 {
                 if self.pix(
                     doppler,
-                    current.angle + FOUR_DIRECTIONS[index].angle,
-                    current.r + FOUR_DIRECTIONS[index].r,
+                    current.bearing + FOUR_DIRECTIONS[index].0,
+                    current.r + FOUR_DIRECTIONS[index].1,
                 ) {
                     found = true;
                     break;
@@ -552,17 +564,17 @@ impl HistorySpokes {
             if !found {
                 return false; // no next point found (this happens when the blob consists of one single pixel)
             } // next point found
-            current.angle += FOUR_DIRECTIONS[index].angle;
-            current.r += FOUR_DIRECTIONS[index].r;
+            current.bearing += FOUR_DIRECTIONS[index].0;
+            current.r += FOUR_DIRECTIONS[index].1;
             if count >= length {
                 return true;
             }
             count += 1;
-            if current.angle > max_angle.angle {
-                max_angle = current;
+            if current.bearing > max_bearing.bearing {
+                max_bearing = current;
             }
-            if current.angle < min_angle.angle {
-                min_angle = current;
+            if current.bearing < min_bearing.bearing {
+                min_bearing = current;
             }
             if current.r > max_r.r {
                 max_r = current;
@@ -572,11 +584,11 @@ impl HistorySpokes {
             }
         } // contour length is less than m_min_contour_length
         // before returning false erase this blob so we do not have to check this one again
-        if min_angle.angle < 0 {
-            min_angle.angle += self.spokes.len() as i32;
-            max_angle.angle += self.spokes.len() as i32;
+        if min_bearing.bearing < 0 {
+            min_bearing.bearing += self.spokes.len() as i32;
+            max_bearing.bearing += self.spokes.len() as i32;
         }
-        for a in min_angle.angle..=max_angle.angle {
+        for a in min_bearing.bearing..=max_bearing.bearing {
             let a_normalized = self.mod_spokes(a);
             let spoke_sweep_len = self.spokes[a_normalized].sweep.len();
             if spoke_sweep_len == 0 {
@@ -597,27 +609,29 @@ impl HistorySpokes {
     // true if success
     // false when failed
     fn find_contour_from_inside(&mut self, doppler: &Doppler, pol: &mut Polar) -> bool {
-        let mut ang = pol.angle;
+        let mut bearing = pol.raw_bearing();
         let rad = pol.r;
         let mut limit = self.spokes.len() as i32 / 8;
+        let spokes = self.spokes.len() as u32;
 
-        if !self.pix(doppler, ang, rad) {
+        if !self.pix(doppler, bearing, rad) {
             return false;
         }
-        while limit >= 0 && self.pix(doppler, ang, rad) {
-            ang -= 1;
+        while limit >= 0 && self.pix(doppler, bearing, rad) {
+            bearing -= 1;
             limit -= 1;
         }
-        ang += 1;
-        pol.angle = ang;
+        bearing += 1;
+        pol.set_raw_bearing(bearing, spokes);
 
         // return true if the blob has the required min contour length
-        self.multi_pix(doppler, ang, rad)
+        self.multi_pix(doppler, bearing, rad)
     }
 
-    fn pix2(&mut self, doppler: &Doppler, pol: &mut Polar, a: i32, r: i32) -> bool {
-        if self.multi_pix(doppler, a, r) {
-            pol.angle = a;
+    fn pix2(&mut self, doppler: &Doppler, pol: &mut Polar, bearing: i32, r: i32) -> bool {
+        let spokes = self.spokes.len() as u32;
+        if self.multi_pix(doppler, bearing, r) {
+            pol.set_raw_bearing(bearing, spokes);
             pol.r = r;
             return true;
         }
@@ -628,48 +642,48 @@ impl HistorySpokes {
     /// returns the position of the nearest blob found in pol
     /// dist is search radius (1 more or less) in radial pixels
     fn find_nearest_contour(&mut self, doppler: &Doppler, pol: &mut Polar, dist: i32) -> bool {
-        let a = pol.angle;
+        let bearing = pol.raw_bearing();
         let r = pol.r;
         let distance = max(dist, 2);
         let factor: f64 = self.spokes.len() as f64 / 2.0 / PI;
 
         for j in 1..=distance {
             let dist_r = j;
-            let dist_a = max((factor / r as f64 * j as f64) as i32, 1);
+            let dist_bearing = max((factor / r as f64 * j as f64) as i32, 1);
             // search starting from the middle
-            for i in 0..=dist_a {
+            for i in 0..=dist_bearing {
                 // "upper" side
-                if self.pix2(doppler, pol, a - i, r + dist_r) {
+                if self.pix2(doppler, pol, bearing - i, r + dist_r) {
                     return true;
                 }
-                if self.pix2(doppler, pol, a + i, r + dist_r) {
+                if self.pix2(doppler, pol, bearing + i, r + dist_r) {
                     return true;
                 }
             }
             for i in 0..dist_r {
                 // "right hand" side
-                if self.pix2(doppler, pol, a + dist_a, r + i) {
+                if self.pix2(doppler, pol, bearing + dist_bearing, r + i) {
                     return true;
                 }
-                if self.pix2(doppler, pol, a + dist_a, r - i) {
+                if self.pix2(doppler, pol, bearing + dist_bearing, r - i) {
                     return true;
                 }
             }
-            for i in 0..=dist_a {
+            for i in 0..=dist_bearing {
                 // "lower" side
-                if self.pix2(doppler, pol, a - i, r - dist_r) {
+                if self.pix2(doppler, pol, bearing - i, r - dist_r) {
                     return true;
                 }
-                if self.pix2(doppler, pol, a + i, r - dist_r) {
+                if self.pix2(doppler, pol, bearing + i, r - dist_r) {
                     return true;
                 }
             }
             for i in 0..dist_r {
                 // "left hand" side
-                if self.pix2(doppler, pol, a - dist_a, r + i) {
+                if self.pix2(doppler, pol, bearing - dist_bearing, r + i) {
                     return true;
                 }
-                if self.pix2(doppler, pol, a - dist_a, r - i) {
+                if self.pix2(doppler, pol, bearing - dist_bearing, r - i) {
                     return true;
                 }
             }
@@ -692,16 +706,21 @@ impl HistorySpokes {
         let mut pol = pol;
         let mut count = 0;
         let mut current = pol;
-        let mut next = current;
+        let spokes = self.spokes.len() as u32;
+        // Use raw bearing values for contour tracing (allows negative values)
+        let mut current_bearing = current.raw_bearing();
+        let mut current_r = current.r;
+        let mut next_bearing: i32 = current_bearing;
+        let mut next_r: i32 = current_r;
 
         let mut succes = false;
         let mut index = 0;
 
         let mut contour = Contour::new();
-        contour.max_r = current.r;
-        contour.max_angle = current.angle;
-        contour.min_r = current.r;
-        contour.min_angle = current.angle;
+        contour.max_r = current_r;
+        contour.max_bearing = current_bearing;
+        contour.min_r = current_r;
+        contour.min_bearing = current_bearing;
 
         // check if p inside blob
         if pol.r as usize >= self.spokes.len() {
@@ -710,7 +729,7 @@ impl HistorySpokes {
         if pol.r < 4 {
             return Err(Error::RangeTooLow);
         }
-        if !self.pix(doppler, pol.angle, pol.r) {
+        if !self.pix(doppler, pol.raw_bearing(), pol.r) {
             return Err(Error::NoEchoAtStart);
         }
 
@@ -719,8 +738,8 @@ impl HistorySpokes {
             index = i;
             if !self.pix(
                 doppler,
-                current.angle + FOUR_DIRECTIONS[index].angle,
-                current.r + FOUR_DIRECTIONS[index].r,
+                current_bearing + FOUR_DIRECTIONS[index].0,
+                current_r + FOUR_DIRECTIONS[index].1,
             ) {
                 succes = true;
                 break;
@@ -737,10 +756,10 @@ impl HistorySpokes {
             // start with the "left most" translation relative to the previous one
             index = (index + 3) % 4; // we will turn left all the time if possible
             for _i in 0..4 {
-                next = current + FOUR_DIRECTIONS[index];
-                if self.pix(doppler, next.angle, next.r) {
+                next_bearing = current_bearing + FOUR_DIRECTIONS[index].0;
+                next_r = current_r + FOUR_DIRECTIONS[index].1;
+                if self.pix(doppler, next_bearing, next_r) {
                     succes = true; // next point found
-
                     break;
                 }
                 index = (index + 1) % 4;
@@ -749,24 +768,26 @@ impl HistorySpokes {
                 return Err(Error::BrokenContour);
             }
             // next point found
-            current = next;
+            current_bearing = next_bearing;
+            current_r = next_r;
+            current = Polar::from_raw(current_bearing, current_r, 0, spokes);
             if count < MAX_CONTOUR_LENGTH - 1 {
                 contour.contour.push(current);
             } else if count == MAX_CONTOUR_LENGTH - 1 {
                 contour.contour.push(current);
                 contour.contour.push(pol); // shortcut to the beginning for drawing the contour
             }
-            if current.angle > contour.max_angle {
-                contour.max_angle = current.angle;
+            if current_bearing > contour.max_bearing {
+                contour.max_bearing = current_bearing;
             }
-            if current.angle < contour.min_angle {
-                contour.min_angle = current.angle;
+            if current_bearing < contour.min_bearing {
+                contour.min_bearing = current_bearing;
             }
-            if current.r > contour.max_r {
-                contour.max_r = current.r;
+            if current_r > contour.max_r {
+                contour.max_r = current_r;
             }
-            if current.r < contour.min_r {
-                contour.min_r = current.r;
+            if current_r < contour.min_r {
+                contour.min_r = current_r;
             }
             count += 1;
         }
@@ -774,11 +795,12 @@ impl HistorySpokes {
 
         //  CalculateCentroid(*target);    we better use the real centroid instead of the average, TODO
 
-        pol.angle = self.mod_spokes((contour.max_angle + contour.min_angle) / 2) as i32;
-        contour.min_angle = self.mod_spokes(contour.min_angle) as i32;
-        contour.max_angle = self.mod_spokes(contour.max_angle) as i32;
+        let center_bearing = self.mod_spokes((contour.max_bearing + contour.min_bearing) / 2);
+        pol.set_raw_bearing(center_bearing as i32, spokes);
+        contour.min_bearing = self.mod_spokes(contour.min_bearing) as i32;
+        contour.max_bearing = self.mod_spokes(contour.max_bearing) as i32;
         pol.r = (contour.max_r + contour.min_r) / 2;
-        pol.time = self.spokes[pol.angle as usize].time;
+        pol.time = self.spokes[center_bearing].time;
 
         // TODO        self.radar_pos = buffer.history.spokes[pol.angle as usize].pos;
 
@@ -797,7 +819,7 @@ impl HistorySpokes {
 
         let dist = min(dist1, pol.r - 5);
 
-        let contour_found = if self.pix(doppler, pol.angle, pol.r) {
+        let contour_found = if self.pix(doppler, pol.raw_bearing(), pol.r) {
             self.find_contour_from_inside(doppler, &mut pol)
         } else {
             self.find_nearest_contour(doppler, &mut pol, dist)
@@ -824,8 +846,8 @@ impl HistorySpokes {
             return;
         }
 
-        for a in contour.min_angle - DISTANCE_BETWEEN_TARGETS
-            ..=contour.max_angle + DISTANCE_BETWEEN_TARGETS
+        for a in contour.min_bearing - DISTANCE_BETWEEN_TARGETS
+            ..=contour.max_bearing + DISTANCE_BETWEEN_TARGETS
         {
             let a = self.mod_spokes(a);
             let spoke_sweep_len = self.spokes[a].sweep.len();
@@ -848,11 +870,11 @@ impl HistorySpokes {
         // For larger targets clear the "shadow" of the target until 4 * r ????
 
         if contour.length > 20 && distance_to_radar < TARGET_DISTANCE_FOR_BLANKING_SHADOW {
-            let mut max = contour.max_angle;
-            if contour.min_angle - SHADOW_MARGIN > contour.max_angle + SHADOW_MARGIN {
+            let mut max = contour.max_bearing;
+            if contour.min_bearing - SHADOW_MARGIN > contour.max_bearing + SHADOW_MARGIN {
                 max += self.spokes.len() as i32;
             }
-            for a in contour.min_angle - SHADOW_MARGIN..=max + SHADOW_MARGIN {
+            for a in contour.min_bearing - SHADOW_MARGIN..=max + SHADOW_MARGIN {
                 let a = self.mod_spokes(a);
                 let spoke_sweep_len = self.spokes[a].sweep.len();
                 if spoke_sweep_len == 0 {
@@ -871,11 +893,11 @@ impl HistorySpokes {
         // Draw the contour in the history. This is copied to the output data
         // on the next sweep.
         for p in &contour.contour {
-            // Normalize angle (can be negative due to contour tracing) and check r bounds
-            let angle = self.mod_spokes(p.angle);
-            let spoke_sweep_len = self.spokes[angle].sweep.len();
+            // Normalize bearing (can be negative due to contour tracing) and check r bounds
+            let bearing_idx = self.mod_spokes(p.raw_bearing());
+            let spoke_sweep_len = self.spokes[bearing_idx].sweep.len();
             if p.r >= 0 && (p.r as usize) < spoke_sweep_len {
-                self.spokes[angle].sweep[p.r as usize].insert(HistoryPixel::CONTOUR);
+                self.spokes[bearing_idx].sweep[p.r as usize].insert(HistoryPixel::CONTOUR);
             }
         }
     }
@@ -889,10 +911,10 @@ impl TargetSetup {
         let mut pos: ExtendedPosition = own_ship.clone();
         // should be revised, use Mercator formula PositionBearingDistanceMercator()  TODO
         pos.pos.lat += (pol.r as f64 / self.pixels_per_meter)  // Scale to fraction of distance from radar
-                                       * pol.angle_in_rad(self.spokes_per_revolution_f64).cos()
+                                       * pol.bearing_in_rad(self.spokes_per_revolution_f64).cos()
             / METERS_PER_DEGREE_LATITUDE;
         pos.pos.lon += (pol.r as f64 / self.pixels_per_meter)  // Scale to fraction of distance to radar
-                                       * pol.angle_in_rad(self.spokes_per_revolution_f64).sin()
+                                       * pol.bearing_in_rad(self.spokes_per_revolution_f64).sin()
             / meters_per_degree_longitude(&own_ship.pos.lat);
         pos
     }
@@ -911,7 +933,7 @@ impl TargetSetup {
         if angle < 0. {
             angle += self.spokes_per_revolution_f64;
         }
-        return Polar::new(angle as i32, r, p.time);
+        return Polar::from_raw(angle as i32, r, p.time, self.spokes_per_revolution as u32);
     }
 
     pub fn mod_spokes(&self, angle: i32) -> i32 {
@@ -1007,8 +1029,8 @@ impl TargetBuffer {
         }
     }
 
-    /// Broadcast that a target was lost
-    fn broadcast_target_lost(&self, target_id: usize) {
+    /// Broadcast that a target was deleted (sends null to remove from client)
+    fn broadcast_target_deleted(&self, target_id: usize) {
         if let Some(ref tx) = self.sk_client_tx {
             let mut delta = crate::stream::SignalKDelta::new();
             delta.add_target_update(&self.radar_key, target_id, None);
@@ -1193,9 +1215,9 @@ impl TargetBuffer {
                 target.expected = polar.clone();
 
                 log::info!(
-                    "MARPA target {} acquired: polar angle={}, r={}, lat={:.6}, lon={:.6}",
+                    "MARPA target {} acquired: bearing={}, r={}, lat={:.6}, lon={:.6}",
                     id,
-                    polar.angle,
+                    polar.bearing,
                     polar.r,
                     target_pos.pos.lat,
                     target_pos.pos.lon
@@ -1215,6 +1237,27 @@ impl TargetBuffer {
     }
 
     fn cleanup_lost_targets(&mut self) {
+        // Collect IDs of lost targets to broadcast deletion
+        let lost_target_ids: Vec<usize> = if self.use_shared_manager() {
+            self.shared_manager
+                .as_ref()
+                .map(|m| m.get_lost_target_ids())
+                .unwrap_or_default()
+        } else {
+            self.targets
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|(_, t)| t.status == TargetStatus::Lost)
+                .map(|(id, _)| *id)
+                .collect()
+        };
+
+        // Broadcast deletion for each lost target
+        for target_id in lost_target_ids {
+            self.broadcast_target_deleted(target_id);
+        }
+
         // Cleanup via shared manager if merging is enabled
         if self.use_shared_manager() {
             if let Some(ref manager) = self.shared_manager {
@@ -1242,18 +1285,18 @@ impl TargetBuffer {
 
         let target_count = self.targets.read().unwrap().len();
         if target_count > 0 {
-            // Log target angles for each segment refresh
-            let target_angles: Vec<i32> = self
+            // Log target bearings for each segment refresh
+            let target_bearings: Vec<SpokeBearing> = self
                 .targets
                 .read()
                 .unwrap()
                 .values()
-                .map(|t| t.contour.position.angle)
+                .map(|t| t.contour.position.bearing)
                 .collect();
             log::debug!(
-                "refresh_all_arpa_targets: {} targets at angles {:?}, scanning range {}..{}",
+                "refresh_all_arpa_targets: {} targets at bearings {:?}, scanning range {}..{}",
                 target_count,
-                target_angles,
+                target_bearings,
                 start_angle,
                 end_angle
             );
@@ -1321,9 +1364,9 @@ impl TargetBuffer {
                 }
             };
             log::debug!(
-                "Processing local target {} at angle {}",
+                "Processing local target {} at bearing {}",
                 target_id,
-                target.contour.position.angle
+                target.contour.position.bearing
             );
             self.refresh_single_target(
                 target_id,
@@ -1343,19 +1386,20 @@ impl TargetBuffer {
         end_angle: i32,
         search_radius: i32,
     ) {
-        if !target
-            .contour
-            .position
-            .angle_is_between(start_angle, end_angle)
-        {
+        let spokes = self.setup.spokes_per_revolution as u32;
+        if !target.contour.position.bearing_is_between(
+            SpokeBearing::new(start_angle, spokes),
+            SpokeBearing::new(end_angle, spokes),
+            spokes,
+        ) {
             return;
         }
 
         log::info!(
-            "Refreshing target {}: status={:?}, angle={}, range={}..{}",
+            "Refreshing target {}: status={:?}, bearing={}, range={}..{}",
             target_id,
             target.status,
-            target.contour.position.angle,
+            target.contour.position.bearing,
             start_angle,
             end_angle
         );
@@ -1415,11 +1459,8 @@ impl TargetBuffer {
         }
 
         // Broadcast target state to SignalK clients
-        if target.status == TargetStatus::Lost {
-            self.broadcast_target_lost(target_id);
-        } else {
-            self.broadcast_target_update(&target, &target.radar_pos);
-        }
+        // When lost, send update with status="lost" - deletion (null) is sent in cleanup_lost_targets
+        self.broadcast_target_update(&target, &target.radar_pos);
 
         // Update the target back to storage
         if self.use_shared_manager() {
@@ -1442,7 +1483,7 @@ impl TargetBuffer {
             self.targets.read().unwrap().keys().copied().collect()
         };
         for target_id in target_ids {
-            self.broadcast_target_lost(target_id);
+            self.broadcast_target_deleted(target_id);
         }
 
         // Use shared manager if merging is enabled
@@ -1723,10 +1764,10 @@ impl TargetBuffer {
         target.source_zone = source_zone;
 
         log::info!(
-            "Target {} acquired: status={:?}, angle={}, range={}, lat={:.6}, lon={:.6}",
+            "Target {} acquired: status={:?}, bearing={}, range={}, lat={:.6}, lon={:.6}",
             uid,
             target.status,
-            pol.angle,
+            pol.bearing,
             pol.r,
             target_pos.pos.lat,
             target_pos.pos.lon
@@ -1842,7 +1883,8 @@ impl TargetBuffer {
         };
 
         // Store heading for use by ARPA blob processing
-        self.arpa_detector.current_heading = heading;
+        let spokes_u32 = spokes as u32;
+        self.arpa_detector.current_heading = SpokeHeading::new(heading, spokes_u32);
 
         // Build up static background when in stationary mode
         let background_on = self.setup.stationary;
@@ -1885,7 +1927,9 @@ impl TargetBuffer {
         }
 
         // Build blobs incrementally
-        self.process_blob_pixels(angle as i32, heading, &strong_pixels, time, pos.clone());
+        let bearing = SpokeBearing::new(angle as i32, spokes_u32);
+        let heading_typed = SpokeHeading::new(heading, spokes_u32);
+        self.process_blob_pixels(bearing, heading_typed, &strong_pixels, time, pos.clone());
 
         self.refresh_targets(angle);
     }
@@ -1928,17 +1972,17 @@ impl TargetBuffer {
     /// Delegates to ArpaDetector for automatic target detection within guard zones.
     fn process_blob_pixels(
         &mut self,
-        angle: i32,
-        heading: i32,
+        bearing: SpokeBearing,
+        heading: SpokeHeading,
         strong_pixels: &[i32],
         time: u64,
         pos: GeoPosition,
     ) {
-        let spokes = self.setup.spokes_per_revolution;
+        let spokes = self.setup.spokes_per_revolution as u32;
 
         // Delegate blob detection to ArpaDetector
         let completed_blobs = self.arpa_detector.process_blob_pixels(
-            angle,
+            bearing,
             heading,
             strong_pixels,
             time,
@@ -1954,20 +1998,22 @@ impl TargetBuffer {
 
     /// Process a completed blob - check validity and pass to target acquisition
     fn process_completed_blob(&mut self, blob: BlobInProgress) {
+        let spokes = self.setup.spokes_per_revolution as u32;
+
         if !blob.is_valid() {
             log::trace!(
-                "Blob rejected: pixels={}, range={}..{}, angles={}..{}",
+                "Blob rejected: pixels={}, range={}..{}, bearings={}..{}",
                 blob.pixel_count,
                 blob.min_r,
                 blob.max_r,
-                blob.min_angle,
-                blob.max_angle
+                blob.min_bearing,
+                blob.max_bearing
             );
             return;
         }
 
-        let (center_angle, center_r) = blob.center();
-        let spokes = self.setup.spokes_per_revolution;
+        let (center_bearing_raw, center_r) = blob.center(spokes);
+        let center_bearing = SpokeBearing::new(center_bearing_raw, spokes);
 
         // Use the heading from when the blob was first detected, not the current heading
         // This ensures consistent guard zone validation since the blob's pixels were
@@ -1977,7 +2023,7 @@ impl TargetBuffer {
         // Determine which guard zone (if any) contains this blob
         let source_zone = self
             .arpa_detector
-            .get_containing_zone(center_angle, center_r, heading, spokes);
+            .get_containing_zone(center_bearing, center_r, heading, spokes);
 
         // Verify blob is within a guard zone - this should always pass since pixels
         // were filtered by guard zone during collection, but log details if it fails
@@ -1985,7 +2031,7 @@ impl TargetBuffer {
             let current_heading = self.arpa_detector.current_heading;
             log::warn!(
                 "Blob outside guard zones! center=({}, {}), start_heading={}, current_heading={}, zone0={:?}, zone1={:?}",
-                center_angle,
+                center_bearing,
                 center_r,
                 heading,
                 current_heading,
@@ -1997,21 +2043,21 @@ impl TargetBuffer {
             return;
         }
 
-        // Get the ship position at the center angle from history
+        // Get the ship position at the center bearing from history
         // This is more accurate than blob.start_pos which is from when the blob started
-        let center_angle_idx = (center_angle as usize) % self.history.spokes.len();
-        let center_pos = self.history.spokes[center_angle_idx].pos.clone();
-        let center_time = self.history.spokes[center_angle_idx].time;
+        let center_bearing_idx = (center_bearing_raw as usize) % self.history.spokes.len();
+        let center_pos = self.history.spokes[center_bearing_idx].pos.clone();
+        let center_time = self.history.spokes[center_bearing_idx].time;
 
         log::info!(
-            "Blob detected: {} pixels, center=({}, {}), range={}..{}, angles={}..{}, pos=({:.6}, {:.6})",
+            "Blob detected: {} pixels, center=({}, {}), range={}..{}, bearings={}..{}, pos=({:.6}, {:.6})",
             blob.pixel_count,
-            center_angle,
+            center_bearing,
             center_r,
             blob.min_r,
             blob.max_r,
-            blob.min_angle,
-            blob.max_angle,
+            blob.min_bearing,
+            blob.max_bearing,
             center_pos.lat,
             center_pos.lon
         );
@@ -2020,7 +2066,7 @@ impl TargetBuffer {
         self.mark_blob_edges(&blob);
 
         // Create a Polar position for the blob center
-        let pol = Polar::new(center_angle, center_r, center_time);
+        let pol = Polar::new(center_bearing, center_r, center_time);
 
         // Pass to target acquisition with the ship position at the center angle
         self.acquire_or_match_blob(pol, center_pos, source_zone);
@@ -2029,27 +2075,35 @@ impl TargetBuffer {
     /// Mark the entire blob area in the history array for visualization overlay
     fn mark_blob_edges(&mut self, blob: &BlobInProgress) {
         let spokes = self.setup.spokes_per_revolution as usize;
+        let min_bearing = blob.min_bearing.raw() as usize;
+        let max_bearing = blob.max_bearing.raw() as usize;
         log::debug!(
-            "mark_blob_edges: blob angle=[{}..{}] r=[{}..{}]",
-            blob.min_angle,
-            blob.max_angle,
+            "mark_blob_edges: blob bearing=[{}..{}] r=[{}..{}]",
+            min_bearing,
+            max_bearing,
             blob.min_r,
             blob.max_r
         );
 
         // Fill the entire blob bounding box
-        for angle in blob.min_angle..=blob.max_angle {
-            let a = (angle as usize) % spokes;
-            if a >= self.history.spokes.len() {
+        // Handle wraparound: if max < min, we need to iterate min..spokes and 0..=max
+        let bearing_range: Vec<usize> = if max_bearing >= min_bearing {
+            (min_bearing..=max_bearing).collect()
+        } else {
+            (min_bearing..spokes).chain(0..=max_bearing).collect()
+        };
+
+        for bearing in bearing_range {
+            if bearing >= self.history.spokes.len() {
                 continue;
             }
-            let sweep_len = self.history.spokes[a].sweep.len();
+            let sweep_len = self.history.spokes[bearing].sweep.len();
 
             // Mark all pixels from min_r to max_r
             for r in blob.min_r..=blob.max_r {
                 let r_idx = r as usize;
                 if r_idx < sweep_len {
-                    self.history.spokes[a].sweep[r_idx].insert(HistoryPixel::BLOB_EDGE);
+                    self.history.spokes[bearing].sweep[r_idx].insert(HistoryPixel::BLOB_EDGE);
                 }
             }
         }
@@ -2071,19 +2125,19 @@ impl TargetBuffer {
             }
 
             // Calculate distance from blob center to target's expected position
-            let angle_diff = (pol.angle - target.expected.angle).abs();
-            let angle_diff = angle_diff.min(spokes - angle_diff); // Handle wrap-around
+            let bearing_diff = (pol.raw_bearing() - target.expected.raw_bearing()).abs();
+            let bearing_diff = bearing_diff.min(spokes - bearing_diff); // Handle wrap-around
             let range_diff = (pol.r - target.expected.r).abs();
 
             // Check if within search radius (use squared distance for efficiency)
-            let dist_sq = angle_diff * angle_diff + range_diff * range_diff;
+            let dist_sq = bearing_diff * bearing_diff + range_diff * range_diff;
             if dist_sq <= MATCH_RADIUS * MATCH_RADIUS {
                 log::debug!(
                     "Blob matches existing target {}: blob=({},{}), expected=({},{}), dist={}",
                     target_id,
-                    pol.angle,
+                    pol.bearing,
                     pol.r,
-                    target.expected.angle,
+                    target.expected.bearing,
                     target.expected.r,
                     (dist_sq as f64).sqrt()
                 );
@@ -2115,11 +2169,11 @@ impl Contour {
     fn new() -> Contour {
         Contour {
             length: 0,
-            min_angle: 0,
-            max_angle: 0,
+            min_bearing: 0,
+            max_bearing: 0,
             min_r: 0,
             max_r: 0,
-            position: Polar::new(0, 0, 0),
+            position: Polar::zero(),
             contour: Vec::new(),
         }
     }
@@ -2158,7 +2212,7 @@ impl ArpaTarget {
             receding_pix: 0,
             have_doppler,
             position,
-            expected: Polar::new(0, 0, 0),
+            expected: Polar::zero(),
             age_rotations: 0,
             source_radar: String::new(),
             tracking_radar: String::new(),
@@ -2172,9 +2226,9 @@ impl ArpaTarget {
     ) -> Result<Self, Error> {
         // target not found
         log::debug!(
-            "Not found id={}, angle={}, r={}, pass={:?}, lost_count={}, status={:?}",
+            "Not found id={}, bearing={}, r={}, pass={:?}, lost_count={}, status={:?}",
             target.target_id,
-            pol.angle,
+            pol.bearing,
             pol.r,
             pass,
             target.lost_count,
@@ -2194,9 +2248,9 @@ impl ArpaTarget {
             || target.status == TargetStatus::Acquire0
         {
             log::debug!(
-                "low status deleted id={}, angle={}, r={}, pass={:?}, lost_count={}",
+                "low status deleted id={}, bearing={}, r={}, pass={:?}, lost_count={}",
                 target.target_id,
-                pol.angle,
+                pol.bearing,
                 pol.r,
                 pass,
                 target.lost_count
@@ -2262,17 +2316,17 @@ impl ArpaTarget {
         let own_pos = ExtendedPosition::new(own_pos.unwrap(), 0., 0., 0, 0., 0.);
 
         let mut pol = setup.pos2polar(&target.position, &own_pos);
-        let alfa0 = pol.angle;
+        let bearing0 = pol.raw_bearing();
         let r0 = pol.r;
         let scan_margin = setup.scan_margin();
-        let angle_time = history.spokes[setup.mod_spokes(pol.angle + scan_margin) as usize].time;
-        // angle_time is the time of a spoke SCAN_MARGIN spokes forward of the target, if that spoke is refreshed we assume that the target has been refreshed
+        let bearing_time = history.spokes[setup.mod_spokes(pol.raw_bearing() + scan_margin) as usize].time;
+        // bearing_time is the time of a spoke SCAN_MARGIN spokes forward of the target, if that spoke is refreshed we assume that the target has been refreshed
 
         let mut rotation_period = setup.rotation_speed_ms as u64;
         if rotation_period == 0 {
             rotation_period = 2500; // default value
         }
-        if angle_time < target.refresh_time + rotation_period - 100 {
+        if bearing_time < target.refresh_time + rotation_period - 100 {
             // the 100 is a margin on the rotation period
             // the next image of the target is not yet there
 
@@ -2280,16 +2334,16 @@ impl ArpaTarget {
         }
 
         // set new refresh time
-        target.refresh_time = history.spokes[pol.angle as usize].time;
+        target.refresh_time = history.spokes[pol.raw_bearing() as usize].time;
         let prev_position = target.position.clone(); // save the previous target position
 
         // PREDICTION CYCLE
 
         log::debug!(
-            "Begin prediction cycle target_id={}, status={:?}, angle={}, r={}, contour={}, pass={:?}, lat={}, lon={}",
+            "Begin prediction cycle target_id={}, status={:?}, bearing={}, r={}, contour={}, pass={:?}, lat={}, lon={}",
             target.target_id,
             target.status,
-            pol.angle,
+            pol.bearing,
             pol.r,
             target.contour.length,
             pass,
@@ -2335,21 +2389,22 @@ impl ArpaTarget {
         target.kalman.predict(&mut x_local, delta_t); // x_local is new estimated local position of the target
         // now set the polar to expected angular position from the expected local position
 
-        pol.angle = setup.mod_spokes(
+        let new_bearing = setup.mod_spokes(
             (f64::atan2(x_local.pos.lon, x_local.pos.lat) * setup.spokes_per_revolution_f64
                 / (2. * PI)) as i32,
-        );
+        ) as i32;
+        pol.set_raw_bearing(new_bearing, setup.spokes_per_revolution as u32);
         pol.r = ((x_local.pos.lat * x_local.pos.lat + x_local.pos.lon * x_local.pos.lon).sqrt()
             * setup.pixels_per_meter) as i32;
 
         // zooming and target movement may  cause r to be out of bounds
         log::trace!(
-            "PREDICTION target_id={}, pass={:?}, status={:?}, angle={}.{}, r={}.{}, contour={}, speed={}, sd_speed_kn={} doppler={:?}, lostcount={}",
+            "PREDICTION target_id={}, pass={:?}, status={:?}, bearing={}.{}, r={}.{}, contour={}, speed={}, sd_speed_kn={} doppler={:?}, lostcount={}",
             target.target_id,
             pass,
             target.status,
-            alfa0,
-            pol.angle,
+            bearing0,
+            pol.bearing,
             r0,
             pol.r,
             target.contour.length,
@@ -2361,9 +2416,9 @@ impl ArpaTarget {
         if pol.r >= setup.spoke_len || pol.r <= 0 {
             // delete target if too far out
             log::trace!(
-                "R out of bounds,  target_id={}, angle={}, r={}, contour={}, pass={:?}",
+                "R out of bounds,  target_id={}, bearing={}, r={}, contour={}, pass={:?}",
                 target.target_id,
-                pol.angle,
+                pol.bearing,
                 pol.r,
                 target.contour.length,
                 pass
@@ -2397,20 +2452,20 @@ impl ArpaTarget {
 
         match found {
             Ok((contour, pos)) => {
-                let dist_angle =
-                    ((pol.angle - starting_position.angle) as f64 * pol.r as f64 / 326.) as i32;
+                let dist_bearing =
+                    ((pol.raw_bearing() - starting_position.raw_bearing()) as f64 * pol.r as f64 / 326.) as i32;
                 let dist_radial = pol.r - starting_position.r;
                 let dist_total =
-                    ((dist_angle * dist_angle + dist_radial * dist_radial) as f64).sqrt() as i32;
+                    ((dist_bearing * dist_bearing + dist_radial * dist_radial) as f64).sqrt() as i32;
 
                 log::debug!(
-                    "id={}, Found dist_angle={}, dist_radial={}, dist_total={}, pol.angle={}, starting_position.angle={}, doppler={:?}",
+                    "id={}, Found dist_bearing={}, dist_radial={}, dist_total={}, pol.bearing={}, starting_position.bearing={}, doppler={:?}",
                     target.target_id,
-                    dist_angle,
+                    dist_bearing,
                     dist_radial,
                     dist_total,
-                    pol.angle,
-                    starting_position.angle,
+                    pol.bearing,
+                    starting_position.bearing,
                     target.doppler_target
                 );
 
@@ -2436,9 +2491,9 @@ impl ArpaTarget {
 
                 history.reset_pixels(&contour, &pos, &setup.pixels_per_meter);
                 log::debug!(
-                    "target Found ResetPixels target_id={}, angle={}, r={}, contour={}, pass={:?}, doppler={:?}",
+                    "target Found ResetPixels target_id={}, bearing={}, r={}, contour={}, pass={:?}, doppler={:?}",
                     target.target_id,
-                    pol.angle,
+                    pol.bearing,
                     pol.r,
                     target.contour.length,
                     pass,
@@ -2448,9 +2503,9 @@ impl ArpaTarget {
                     // don't use this blob, could be radar interference
                     // The pixels of the blob have been reset, so you won't find it again
                     log::debug!(
-                        "reset found because of max contour length id={}, angle={}, r={}, contour={}, pass={:?}",
+                        "reset found because of max contour length id={}, bearing={}, r={}, contour={}, pass={:?}",
                         target.target_id,
-                        pol.angle,
+                        pol.bearing,
                         pol.r,
                         target.contour.length,
                         pass
@@ -2460,7 +2515,7 @@ impl ArpaTarget {
 
                 target.lost_count = 0;
                 let mut p_own = ExtendedPosition::empty();
-                p_own.pos = history.spokes[history.mod_spokes(pol.angle) as usize].pos;
+                p_own.pos = history.spokes[history.mod_spokes(pol.raw_bearing()) as usize].pos;
                 target.age_rotations += 1;
                 target.status = match target.status {
                     TargetStatus::Acquire0 => TargetStatus::Acquire1,
@@ -2520,24 +2575,24 @@ impl ArpaTarget {
 
                 if target.status == TargetStatus::Acquire2 {
                     // determine if this is a small and fast target
-                    let dist_angle = pol.angle - alfa0;
+                    let dist_bearing = pol.raw_bearing() - bearing0;
                     let dist_r = pol.r - r0;
-                    let size_angle = max(
-                        history.mod_spokes(target.contour.max_angle - target.contour.min_angle),
+                    let size_bearing = max(
+                        history.mod_spokes(target.contour.max_bearing - target.contour.min_bearing),
                         1,
                     );
                     let size_r = max(target.contour.max_r - target.contour.min_r, 1);
                     let test = (dist_r as f64 / size_r as f64).abs()
-                        + (dist_angle as f64 / size_angle as f64).abs();
+                        + (dist_bearing as f64 / size_bearing as f64).abs();
                     target.small_fast = test > 2.;
                     log::debug!(
-                        "smallandfast, id={}, test={}, dist_r={}, size_r={}, dist_angle={}, size_angle={}",
+                        "smallandfast, id={}, test={}, dist_r={}, size_r={}, dist_bearing={}, size_bearing={}",
                         target.target_id,
                         test,
                         dist_r,
                         size_r,
-                        dist_angle,
-                        size_angle
+                        dist_bearing,
+                        size_bearing
                     );
                 }
 
@@ -2597,13 +2652,13 @@ impl ArpaTarget {
                     }
 
                     log::debug!(
-                        "FOUND {:?} CYCLE id={}, status={:?}, age={}, angle={}.{}, r={}.{}, contour={}, speed={}, sd_speed_kn={}, doppler={:?}",
+                        "FOUND {:?} CYCLE id={}, status={:?}, age={}, bearing={}.{}, r={}.{}, contour={}, speed={}, sd_speed_kn={}, doppler={:?}",
                         pass,
                         target.target_id,
                         target.status,
                         target.age_rotations,
-                        alfa0,
-                        pol.angle,
+                        bearing0,
+                        pol.bearing,
                         r0,
                         pol.r,
                         target.contour.length,
@@ -2661,7 +2716,7 @@ impl ArpaTarget {
         for i in 0..self.contour.contour.len() {
             for radius in 0..history.spokes[0].sweep.len() {
                 let pixel =
-                    history.spokes[history.mod_spokes(self.contour.contour[i].angle)].sweep[radius];
+                    history.spokes[history.mod_spokes(self.contour.contour[i].raw_bearing())].sweep[radius];
                 let target = pixel.contains(HistoryPixel::TARGET); // above threshold bit
                 if !target {
                     break;
@@ -3123,7 +3178,7 @@ impl ArpaTarget {
             },
             position: TargetPositionApi {
                 bearing,
-                distance,
+                distance: distance.round() as i32,
                 latitude: Some(self.position.pos.lat),
                 longitude: Some(self.position.pos.lon),
             },

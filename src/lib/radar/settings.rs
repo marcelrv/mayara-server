@@ -561,10 +561,7 @@ impl Controls {
 
             new_list(ControlId::ArpaDetectMode, &["Normal", "Medium", "Fast"]).build(&mut controls);
 
-            //TODO: Target tracking
-            //if args.targets == TargetMode::Arpa {
-            //    new_button(ControlId::ClearTargets).build(&mut controls);
-            //}
+            new_button(ControlId::ClearTargets).build(&mut controls);
         }
 
         let (all_clients_tx, _) = tokio::sync::broadcast::channel(32);

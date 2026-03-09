@@ -12,6 +12,7 @@ use std::{
 use crate::radar::GeoPosition;
 
 use super::kalman::Polar;
+use super::spoke_coords::SpokeBearing;
 use super::{
     ArpaTarget, ArpaTargetApi, Doppler, ExtendedPosition, RefreshState, TargetStatus,
     METERS_PER_DEGREE_LATITUDE,
@@ -228,9 +229,9 @@ impl SharedTargetManager {
                 target.expected = polar.clone();
 
                 log::debug!(
-                    "Acquired target {} polar: angle={}, r={}, pixels_per_meter={}",
+                    "Acquired target {} polar: bearing={}, r={}, pixels_per_meter={}",
                     target_id,
-                    polar.angle,
+                    polar.bearing,
                     polar.r,
                     config.pixels_per_meter
                 );
@@ -276,7 +277,7 @@ impl SharedTargetManager {
         if angle < 0. {
             angle += spokes_per_revolution;
         }
-        Polar::new(angle as i32, r, target.time)
+        Polar::new(SpokeBearing::new(angle as i32, spokes_per_revolution as u32), r, target.time)
     }
 
     /// Add an already-constructed target to the shared manager
@@ -427,6 +428,17 @@ impl SharedTargetManager {
     pub(crate) fn get_all_target_ids(&self) -> Vec<usize> {
         let state = self.inner.read().unwrap();
         state.targets.keys().copied().collect()
+    }
+
+    /// Get IDs of all lost targets
+    pub(crate) fn get_lost_target_ids(&self) -> Vec<usize> {
+        let state = self.inner.read().unwrap();
+        state
+            .targets
+            .iter()
+            .filter(|(_, managed)| managed.target.status == TargetStatus::Lost)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// Clean up lost targets and reset refresh state for the next cycle
