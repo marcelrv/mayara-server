@@ -40,7 +40,7 @@ import {
   isStandaloneMode,
   isPlaybackRadar,
 } from "./api.js";
-import { setZoneEditMode, setSectorEditMode } from "./viewer.js";
+import { setZoneEditMode, setSectorEditMode, updateZoneForEditing } from "./viewer.js";
 import { SpokeProcessingMode } from "./spoke_processor.js";
 
 const { div, label, input, button, select, option, span } = van.tags;
@@ -612,6 +612,31 @@ const ZoneValue = (id, name, control) => {
     updateEditFields(newZone);
   }
 
+  function onDragMove(newZone) {
+    // Called during dragging - update edit fields in real time
+    updateEditFields(newZone);
+  }
+
+  function updateZonePreview() {
+    // Called when edit fields change - update the zone preview on the viewer
+    const startDeg = parseInt(document.getElementById(`${prefix}_edit_start_angle`)?.value) || 0;
+    const endDeg = parseInt(document.getElementById(`${prefix}_edit_end_angle`)?.value) || 0;
+    const startDist = parseInt(document.getElementById(`${prefix}_edit_start_dist`)?.value) || 0;
+    const endDist = parseInt(document.getElementById(`${prefix}_edit_end_dist`)?.value) || 0;
+
+    // Convert degrees to radians for the viewer
+    const startRad = (startDeg * Math.PI) / 180;
+    const endRad = (endDeg * Math.PI) / 180;
+
+    updateZoneForEditing(id, {
+      startAngle: startRad,
+      endAngle: endRad,
+      startDistance: startDist,
+      endDistance: endDist,
+      enabled: true, // Always draw during editing
+    });
+  }
+
   function enterEditMode() {
     const container = document.getElementById(`myr_${id}`);
     const displaySection = container.querySelector(".myr_zone_display");
@@ -632,7 +657,10 @@ const ZoneValue = (id, name, control) => {
     editSection.style.display = "block";
 
     // Enable drag handles on the viewer
-    setZoneEditMode(id, true, onDragEnd);
+    setZoneEditMode(id, true, onDragEnd, onDragMove);
+
+    // Initialize zone preview
+    updateZonePreview();
   }
 
   function exitEditMode() {
@@ -645,6 +673,21 @@ const ZoneValue = (id, name, control) => {
 
     // Disable drag handles on the viewer
     setZoneEditMode(id, false);
+
+    // Restore zone to server state
+    const cv = myr_control_values[id] || {};
+    if (cv.enabled) {
+      updateZoneForEditing(id, {
+        startAngle: cv.value ?? 0,
+        endAngle: cv.endValue ?? 0,
+        startDistance: cv.startDistance ?? 0,
+        endDistance: cv.endDistance ?? 0,
+        enabled: true,
+      });
+    } else {
+      // Zone was not enabled, clear it
+      updateZoneForEditing(id, null);
+    }
   }
 
   function saveZone() {
@@ -717,6 +760,7 @@ const ZoneValue = (id, name, control) => {
             min: minAngle,
             max: maxAngle,
             value: 0,
+            oninput: updateZonePreview,
           })
         ),
         div(
@@ -728,6 +772,7 @@ const ZoneValue = (id, name, control) => {
             min: minAngle,
             max: maxAngle,
             value: 0,
+            oninput: updateZonePreview,
           })
         )
       ),
@@ -742,6 +787,7 @@ const ZoneValue = (id, name, control) => {
             min: 0,
             max: maxDist,
             value: 0,
+            oninput: updateZonePreview,
           })
         ),
         div(
@@ -753,6 +799,7 @@ const ZoneValue = (id, name, control) => {
             min: 0,
             max: maxDist,
             value: 0,
+            oninput: updateZonePreview,
           })
         )
       ),

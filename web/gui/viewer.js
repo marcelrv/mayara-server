@@ -3,6 +3,7 @@
 export {
   setZoneEditMode,
   setSectorEditMode,
+  updateZoneForEditing,
 };
 
 import {
@@ -742,6 +743,11 @@ function radarLoaded(r) {
     console.log("websocket error:", e);
   };
   webSocket.onmessage = (e) => {
+    // Skip processing when page is not visible to prevent queueing up updates
+    if (document.hidden) {
+      return;
+    }
+
     try {
       const dataSize = e.data?.byteLength || e.data?.length || 0;
       if (dataSize === 0) {
@@ -902,6 +908,25 @@ function setZoneEditMode(controlId, editing, onDragEnd = null) {
     : null;
 
   ppi.setEditingZone(zoneIndex, wrappedCallback);
+}
+
+/**
+ * Update a zone's parameters for live preview during editing.
+ * Called when form fields change to show immediate visual feedback.
+ */
+function updateZoneForEditing(controlId, zone) {
+  if (!ppi) return;
+
+  let zoneIndex = null;
+  if (controlId === "guardZone1") {
+    zoneIndex = 0;
+  } else if (controlId === "guardZone2") {
+    zoneIndex = 1;
+  }
+
+  if (zoneIndex === null) return;
+
+  ppi.setGuardZone(zoneIndex, zone);
 }
 
 /**

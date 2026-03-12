@@ -82,7 +82,7 @@ class PPI {
 
     // Radar state
     this.range = 0;
-    this.actual_range = 0;
+    this.spoke_range = 0;
     this.lastHeading = null;
     this.headingRotation = 0;
     this.headingMode = "headingUp";
@@ -119,6 +119,7 @@ class PPI {
     this.dragState = null;
     this.hoveredHandle = null;
     this.onZoneDragEnd = null;
+    this.onZoneDragMove = null;
 
     // Sector edit mode state
     this.editingSectorIndex = null;
@@ -272,9 +273,10 @@ class PPI {
     }
   }
 
-  setEditingZone(index, onDragEnd = null) {
+  setEditingZone(index, onDragEnd = null, onDragMove = null) {
     this.editingZoneIndex = index;
     this.onZoneDragEnd = onDragEnd;
+    this.onZoneDragMove = onDragMove;
     this.dragState = null;
     this.hoveredHandle = null;
 
@@ -478,9 +480,9 @@ class PPI {
     }
 
     // Handle range changes
-    if (this.actual_range !== spoke.range) {
-      const wasInitialRange = this.actual_range === 0;
-      this.actual_range = spoke.range;
+    if (this.spoke_range !== spoke.range) {
+      const wasInitialRange = this.spoke_range === 0;
+      this.spoke_range = spoke.range;
       this.data.fill(0);
       if (this.spokeProcessor) {
         this.spokeProcessor.reset();
@@ -573,7 +575,7 @@ class PPI {
     if (!this.overlay_ctx) return;
 
     const ctx = this.overlay_ctx;
-    const range = this.range || this.actual_range;
+    const range = this.range;
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.width, this.height);
@@ -694,10 +696,10 @@ class PPI {
   #drawGuardZone(ctx, zone, fillColor, strokeColor) {
     if (!zone) return;
 
-    const range = this.range || this.actual_range;
-    if (!range || range <= 0) return;
+    // Use the Control Range for UI drawing
+    if (!this.range || this.range <= 0) return;
 
-    const pixelsPerMeter = this.beam_length / range;
+    const pixelsPerMeter = this.beam_length / this.range;
     const innerRadius = zone.startDistance * pixelsPerMeter;
     const outerRadius = zone.endDistance * pixelsPerMeter;
 
@@ -754,9 +756,9 @@ class PPI {
   }
 
   #drawTargets(ctx, range) {
-    // Use actual_range for target drawing (matches acquisition coordinate conversion)
+    // Use spoke_range for target drawing (matches acquisition coordinate conversion)
     // Navico radars overscan - spoke data covers more distance than user-selected range
-    const actualRange = this.actual_range || range;
+    const actualRange = this.spoke_range || range;
     if (!actualRange || actualRange <= 0 || this.targets.size === 0) return;
 
     const pixelsPerMeter = this.beam_length / actualRange;
@@ -820,14 +822,6 @@ class PPI {
     ctx.fill();
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
-    ctx.stroke();
-
-    // Crosshairs
-    ctx.beginPath();
-    ctx.moveTo(x - targetRadius - 4, y);
-    ctx.lineTo(x + targetRadius + 4, y);
-    ctx.moveTo(x, y - targetRadius - 4);
-    ctx.lineTo(x, y + targetRadius + 4);
     ctx.stroke();
 
     // Draw velocity vector if we have motion data
@@ -1046,10 +1040,8 @@ class PPI {
     while (angle > Math.PI) angle -= 2 * Math.PI;
     while (angle < -Math.PI) angle += 2 * Math.PI;
     const pixelDist = Math.sqrt(dx * dx + dy * dy);
-    // Use actual spoke range for coordinate conversion, not user-selected range
-    // Navico radars "overscan" - spoke data covers more distance than selected range
-    const range = this.actual_range || this.range;
-    const pixelsPerMeter = range > 0 ? this.beam_length / range : 1;
+    // Use the Control Range for UI coordinate conversion, not spoke_range
+    const pixelsPerMeter = this.range > 0 ? this.beam_length / this.range : 1;
     const distance = pixelDist / pixelsPerMeter;
     return { angle, distance };
   }
@@ -1057,10 +1049,10 @@ class PPI {
   #getHandlePositions(zone) {
     if (!zone) return null;
 
-    const range = this.range || this.actual_range;
-    if (!range || range <= 0) return null;
+    // Use the Control Range for UI positioning
+    if (!this.range || this.range <= 0) return null;
 
-    const pixelsPerMeter = this.beam_length / range;
+    const pixelsPerMeter = this.beam_length / this.range;
     const innerRadius = zone.startDistance * pixelsPerMeter;
     const outerRadius = zone.endDistance * pixelsPerMeter;
     const midRadius = (innerRadius + outerRadius) / 2;
@@ -1347,6 +1339,11 @@ class PPI {
           zone.endDistance = zone.startDistance + 50;
         }
         break;
+    }
+
+    // Call onDragMove callback if provided
+    if (this.onZoneDragMove) {
+      this.onZoneDragMove(this.editingZoneIndex, zone);
     }
 
     this.redrawCanvas();
