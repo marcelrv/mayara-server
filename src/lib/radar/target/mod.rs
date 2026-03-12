@@ -25,6 +25,25 @@ pub(crate) mod spoke_coords;
 
 pub(crate) use spoke_coords::{SpokeBearing, SpokeHeading};
 
+const MAX_NUMBER_OF_TARGETS: usize = 100;
+
+const MIN_BLOB_PIXELS: usize = 32; // minimum number of pixels for a valid blob
+const MAX_BLOB_PIXELS: usize = 50000; // maximum blob size (radar interference protection)
+const MAX_LOST_COUNT: i32 = 12; // number of sweeps that target can be missed before it is set to lost
+const MIN_BLOB_RANGE: i32 = 4; // ignore blobs closer than this (main bang)
+
+// Maximum detection speed for each ARPA detect mode (in knots)
+const MAX_DETECTION_SPEED_NORMAL_KN: f64 = 25.;
+const MAX_DETECTION_SPEED_MEDIUM_KN: f64 = 40.;
+const MAX_DETECTION_SPEED_FAST_KN: f64 = 50.;
+
+// Legacy constants - to be removed after full migration to blob-based detection
+const MIN_CONTOUR_LENGTH: usize = 6;
+const MAX_CONTOUR_LENGTH: usize = 2000;
+
+// Width of the contour line in pixels (for visibility)
+const CONTOUR_WIDTH: i32 = 3;
+
 // ============================================================================
 // Signal K API Types for Target Streaming
 // ============================================================================
@@ -98,29 +117,11 @@ impl TargetDangerApi {
     }
 }
 
-const MIN_BLOB_PIXELS: usize = 32; // minimum number of pixels for a valid blob
-const MAX_BLOB_PIXELS: usize = 10000; // maximum blob size (radar interference protection)
-const MAX_LOST_COUNT: i32 = 12; // number of sweeps that target can be missed before it is set to lost
-const MIN_BLOB_RANGE: i32 = 4; // ignore blobs closer than this (main bang)
-
-// Maximum detection speed for each ARPA detect mode (in knots)
-const MAX_DETECTION_SPEED_NORMAL_KN: f64 = 25.;
-const MAX_DETECTION_SPEED_MEDIUM_KN: f64 = 40.;
-const MAX_DETECTION_SPEED_FAST_KN: f64 = 50.;
-
-// Legacy constants - to be removed after full migration to blob-based detection
-const MIN_CONTOUR_LENGTH: usize = 6;
-const MAX_CONTOUR_LENGTH: usize = 2000;
-
-// Width of the contour line in pixels (for visibility)
-const CONTOUR_WIDTH: i32 = 3;
-
 pub const METERS_PER_DEGREE_LATITUDE: f64 = 60. * NAUTICAL_MILE_F64;
 pub const KN_TO_MS: f64 = NAUTICAL_MILE_F64 / 3600.;
 pub const MS_TO_KN: f64 = 3600. / NAUTICAL_MILE_F64;
 
 const TODO_TARGET_AGE_TO_MIXER: u32 = 5;
-const MAX_NUMBER_OF_TARGETS: usize = 100;
 
 // Re-export ARPA types from the arpa module
 use arpa::{ArpaDetector, BlobInProgress};
@@ -1404,7 +1405,7 @@ impl TargetBuffer {
         }
 
         log::info!(
-            "Refreshing target {}: status={:?}, bearing={}, range={}..{}",
+            "Refreshing target {}: status={:?}, bearing={}, segment={}..{}",
             target_id,
             target.status,
             target.contour.position.bearing,
@@ -1902,11 +1903,19 @@ impl TargetBuffer {
         self.overlay_blob_edges(spoke, angle, legend);
 
         self.history.spokes[angle].time = time;
-        self.history.spokes[angle].sweep.clear();
         self.history.spokes[angle].pos = pos;
-        self.history.spokes[angle]
-            .sweep
-            .resize(spoke.data.len(), HistoryPixel::empty());
+
+        // Preserve CONTOUR bits - they persist until displayed by overlay_blob_edges
+        // Clear all other bits (TARGET, INITIAL, BACKUP, etc.) but keep CONTOUR
+        for pixel in self.history.spokes[angle].sweep.iter_mut() {
+            *pixel = pixel.intersection(HistoryPixel::CONTOUR);
+        }
+        // Resize if spoke length changed
+        if self.history.spokes[angle].sweep.len() != spoke.data.len() {
+            self.history.spokes[angle]
+                .sweep
+                .resize(spoke.data.len(), HistoryPixel::empty());
+        }
 
         // Collect strong return pixels from this spoke
         let mut strong_pixels: Vec<i32> = Vec::new();
@@ -1945,7 +1954,8 @@ impl TargetBuffer {
 
     /// Overlay blob edge markers from history onto the spoke data
     /// In stationary mode, also displays the static background in light grey
-    fn overlay_blob_edges(&self, spoke: &mut Spoke, angle: usize, legend: &Legend) {
+    /// CONTOUR bits are cleared after being displayed (they persist for one rotation)
+    fn overlay_blob_edges(&mut self, spoke: &mut Spoke, angle: usize, legend: &Legend) {
         if angle >= self.history.spokes.len() {
             return;
         }
@@ -1967,12 +1977,14 @@ impl TargetBuffer {
             }
         }
 
-        let sweep = &self.history.spokes[angle].sweep;
+        let sweep = &mut self.history.spokes[angle].sweep;
         let blob_edge_color = legend.target_border;
 
-        for (radius, pixel) in sweep.iter().enumerate() {
+        for (radius, pixel) in sweep.iter_mut().enumerate() {
             if pixel.contains(HistoryPixel::CONTOUR) && radius < spoke.data.len() {
                 spoke.data[radius] = blob_edge_color;
+                // Clear CONTOUR bit after displaying - it persists for exactly one rotation
+                pixel.remove(HistoryPixel::CONTOUR);
             }
         }
     }
