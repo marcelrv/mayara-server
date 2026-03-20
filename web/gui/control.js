@@ -455,6 +455,14 @@ const SectorValue = (id, name, control) => {
     const startRad = (startDeg * Math.PI) / 180;
     const endRad = (endDeg * Math.PI) / 180;
 
+    // Optimistically update local state for consistency
+    myr_control_values[id] = {
+      ...myr_control_values[id],
+      value: startRad,
+      endValue: endRad,
+      enabled: enabledVal,
+    };
+
     apiSetControl(radarId, id, {
       value: startRad,
       endValue: endRad,
@@ -702,6 +710,18 @@ const ZoneValue = (id, name, control) => {
     // Convert degrees to radians for server
     const startRad = (startDeg * Math.PI) / 180;
     const endRad = (endDeg * Math.PI) / 180;
+
+    // Optimistically update local state so exitEditMode() uses the new values
+    // The server will confirm via WebSocket, but this prevents the race condition
+    // where exitEditMode() restores the old values before the WebSocket arrives
+    myr_control_values[id] = {
+      ...myr_control_values[id],
+      value: startRad,
+      endValue: endRad,
+      startDistance: startDist,
+      endDistance: endDist,
+      enabled: enabledVal,
+    };
 
     apiSetControl(radarId, id, {
       value: startRad,
