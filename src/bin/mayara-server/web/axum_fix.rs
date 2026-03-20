@@ -124,15 +124,6 @@ use tokio_tungstenite::{
 use tungstenite::extensions::DeflateConfig;
 use tungstenite::handshake::headers::SecWebsocketExtensions;
 
-/// Extractor for establishing WebSocket connections.
-///
-/// For HTTP/1.1 requests, this extractor requires the request method to be `GET`;
-/// in later versions, `CONNECT` is used instead.
-/// To support both, it should be used with [`any`](crate::routing::any).
-///
-/// See the [module docs](self) for an example.
-///
-/// [`MethodFilter`]: crate::routing::MethodFilter
 #[cfg_attr(docsrs, doc(cfg(feature = "ws")))]
 pub struct WebSocketUpgrade<F = DefaultOnFailedUpgrade> {
     config: WebSocketConfig,

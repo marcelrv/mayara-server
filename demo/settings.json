@@ -1,0 +1,52 @@
+{
+  "radars": {
+    "nav1034A": {
+      "id": 0,
+      "user_name": "HALO 034 A",
+      "spoke_processing": 0,
+      "range_units": 0,
+      "model_name": "HALO",
+      "ranges": [
+        50, 57, 75, 100, 115, 231, 250, 463, 500, 750, 926, 1000, 1389, 1500, 1852, 2000, 2778, 3000, 3704, 4000, 5556, 6000, 7408, 8000, 11112, 12000, 14816, 16000, 22224, 24000, 29632, 36000, 44448, 48000, 59264, 64000, 66672, 72000, 74080, 88896
+      ],
+      "guard_zone_1": {
+        "start_angle": 0.0,
+        "end_angle": 0.0,
+        "start_distance": 0.0,
+        "end_distance": 0.0,
+        "enabled": false
+      },
+      "guard_zone_2": {
+        "start_angle": 0.0,
+        "end_angle": 0.0,
+        "start_distance": 0.0,
+        "end_distance": 0.0,
+        "enabled": false
+      }
+    },
+    "nav1034B": {
+      "id": 0,
+      "user_name": "HALO 034 B",
+      "spoke_processing": 0,
+      "range_units": 0,
+      "model_name": "HALO",
+      "ranges": [
+        50, 57, 75, 100, 115, 231, 250, 463, 500, 750, 926, 1000, 1389, 1500, 1852, 2000, 2778, 3000, 3704, 4000, 5556, 6000, 7408, 8000, 11112, 12000, 14816, 16000, 22224, 24000, 29632, 36000, 44448, 48000, 59264, 64000, 66672, 72000, 74080, 88896
+      ],
+      "guard_zone_1": {
+        "start_angle": 0.0,
+        "end_angle": 0.0,
+        "start_distance": 0.0,
+        "end_distance": 0.0,
+        "enabled": false
+      },
+      "guard_zone_2": {
+        "start_angle": 0.0,
+        "end_angle": 0.0,
+        "start_distance": 0.0,
+        "end_distance": 0.0,
+        "enabled": false
+      }
+    }
+  }
+}

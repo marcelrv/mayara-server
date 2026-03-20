@@ -1,4 +1,3 @@
 #!/bin/sh
-./mayara -i lo -p 3001 --replay --brand navico --targets trails &
-signalk-server/bin/signalk-server -c signalk/ &
-tcpreplay -q -T select -l 0 -i lo /app/halo_and_0183.pcap
+tcpreplay -q -l 0 -i lo /halo_and_0183.pcap > /dev/null 2>&1 &
+mayara-server -i lo --replay --brand navico --navigation-address udp:255.255.255.255:10110 --nmea0183

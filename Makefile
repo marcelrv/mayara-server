@@ -12,9 +12,10 @@
 #   make run      - Build and run server
 #   make run-dev  - Build and run dev server (live GUI reload)
 #   make mpi      - Build for linux and deploy and run on merrimac-pi
+#   make demo     - Rebuild the docker demo image
 #   make clean    - Clean build artifacts
 
-.PHONY: all release debug dev docs run run-dev clean test
+.PHONY: all release debug dev docs run run-dev clean test demo
 
 # Default: build release with embedded docs
 all: release
@@ -85,6 +86,10 @@ run-dev: dev
 # Run tests
 test:
 	cargo test 
+
+# Docker demo
+demo:
+	./demo/build.sh
 
 # Clean build artifacts
 clean:

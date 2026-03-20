@@ -2,14 +2,12 @@
 
 set -eu
 
-[ -d work ] && rm -rf work/
-mkdir -p work
-cp -r ../Cargo* ../mayara-* work
+cd "$(dirname "$0")/.."
 
-docker buildx build --no-cache -t keesverruijt/mayara:latest .
+docker buildx build -f demo/Dockerfile -t marineyachtradar/mayara-server:latest .
 
 echo "Now run the image locally with:
 
-docker run --name mayara-demo -p 3000-3001:3000-3001 keesverruijt/mayara:latest
+docker run --name mayara-demo -p 6502:6502 marineyachtradar/mayara-server:latest
 "
 
