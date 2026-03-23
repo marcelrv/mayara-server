@@ -535,9 +535,11 @@ impl Controls {
 
         // Add controls that are not radar dependent
 
-        new_string(ControlId::UserName)
-            .read_only(false)
-            .build(&mut controls);
+        if !controls.contains_key(&ControlId::UserName) {
+            new_string(ControlId::UserName)
+                .read_only(false)
+                .build(&mut controls);
+        }
 
         new_list(ControlId::SpokeProcessing, &["Clean", "Fill", "Reduce", "Smooth"]).build(&mut controls);
 

@@ -1454,11 +1454,14 @@ impl TargetBuffer {
                         );
                     }
                     target = t;
+                    // Target found - don't run more passes (reset_pixels cleared the blob)
+                    break;
                 }
                 Err(e) => match e {
                     Error::Lost => {
                         log::info!("Target {} lost", target.target_id);
                         target.status = TargetStatus::Lost;
+                        break; // No point trying more passes
                     }
                     _ => {
                         log::debug!("Target {} refresh error {:?}", target.target_id, e);
@@ -1771,6 +1774,8 @@ impl TargetBuffer {
         target.expected = pol;
         target.automatic = automatic;
         target.source_zone = source_zone;
+        // Set refresh_time so the timing check in refresh_target works correctly
+        target.refresh_time = time;
 
         log::info!(
             "Target {} acquired: status={:?}, bearing={}, range={}, lat={:.6}, lon={:.6}",
@@ -2104,6 +2109,7 @@ impl TargetBuffer {
         let pol = Polar::new(center_bearing, center_r, center_time);
 
         // Trace the real contour and set CONTOUR bits for visualization
+        // Always reset pixels so the blob won't be found again this rotation
         let dist = center_r / 2;
         if let Ok((contour, _)) = self.history.get_target(&Doppler::Any, pol.clone(), dist) {
             self.history
@@ -2138,16 +2144,50 @@ impl TargetBuffer {
             let dist_sq = bearing_diff * bearing_diff + range_diff * range_diff;
             if dist_sq <= MATCH_RADIUS * MATCH_RADIUS {
                 log::debug!(
-                    "Blob matches existing target {}: blob=({},{}), expected=({},{}), dist={}",
+                    "Blob matches existing target {}: blob=({},{}), expected=({},{}), dist={}, status={:?}",
                     target_id,
                     pol.bearing,
                     pol.r,
                     target.expected.bearing,
                     target.expected.r,
-                    (dist_sq as f64).sqrt()
+                    (dist_sq as f64).sqrt(),
+                    target.status
                 );
-                // Blob matches an existing target - don't create a new one
-                // The target will be refreshed in the normal refresh cycle
+                // Blob matches an existing target - update the target's expected position and
+                // refresh_time so that the normal refresh cycle knows the blob was found.
+                // This is necessary because reset_pixels has already cleared the TARGET bits,
+                // so the refresh search would fail to find the blob.
+                let matched_target_id = *target_id;
+                let prev_status = target.status.clone();
+                drop(targets); // Release read lock before acquiring write lock
+
+                // Update the matched target
+                let mut targets = self.targets.write().unwrap();
+                if let Some(target) = targets.get_mut(&matched_target_id) {
+                    target.expected = pol.clone();
+                    target.refresh_time = pol.time;
+                    target.refreshed = RefreshState::Found;
+
+                    // Transition status for acquiring targets
+                    let new_status = match &target.status {
+                        TargetStatus::Acquire0 => TargetStatus::Acquire1,
+                        TargetStatus::Acquire1 => TargetStatus::Acquire2,
+                        TargetStatus::Acquire2 => TargetStatus::Acquire3,
+                        TargetStatus::Acquire3 | TargetStatus::Active => TargetStatus::Active,
+                        other => other.clone(),
+                    };
+
+                    if new_status != prev_status {
+                        log::info!(
+                            "Target {} status: {:?} -> {:?} (blob match)",
+                            matched_target_id,
+                            prev_status,
+                            new_status
+                        );
+                    }
+                    target.status = new_status;
+                    target.lost_count = 0;
+                }
                 return;
             }
         }
@@ -2230,13 +2270,12 @@ impl ArpaTarget {
         pass: Pass,
     ) -> Result<Self, Error> {
         // target not found
-        log::debug!(
-            "Not found id={}, bearing={}, r={}, pass={:?}, lost_count={}, status={:?}",
+        log::info!(
+            "Target {} not found: searching at bearing={}, r={}, pass={:?}, status={:?}",
             target.target_id,
             pol.bearing,
             pol.r,
             pass,
-            target.lost_count,
             target.status
         );
 
@@ -2332,10 +2371,11 @@ impl ArpaTarget {
         if rotation_period == 0 {
             rotation_period = 2500; // default value
         }
-        if bearing_time < target.refresh_time + rotation_period - 100 {
-            // the 100 is a margin on the rotation period
+        // Wait for half a rotation since refresh happens 25% ahead of scan.
+        // After half a rotation, the scan has definitely passed the target's bearing.
+        let wait_time = rotation_period / 2;
+        if bearing_time < target.refresh_time + wait_time {
             // the next image of the target is not yet there
-
             return Err(Error::WaitForRefresh);
         }
 
@@ -2524,17 +2564,10 @@ impl ArpaTarget {
                 let mut p_own = ExtendedPosition::empty();
                 p_own.pos = history.spokes[history.mod_spokes(pol.raw_bearing()) as usize].pos;
                 target.age_rotations += 1;
-                target.status = match target.status {
-                    TargetStatus::Acquire0 => TargetStatus::Acquire1,
-                    TargetStatus::Acquire1 => TargetStatus::Acquire2,
-                    TargetStatus::Acquire2 => TargetStatus::Acquire3,
-                    TargetStatus::Acquire3 | TargetStatus::Active => TargetStatus::Active,
-                    _ => TargetStatus::Acquire0,
-                };
+
+                // Check status BEFORE transitioning (like radar_pi does)
                 if target.status == TargetStatus::Acquire0 {
                     // as this is the first measurement, move target to measured position
-                    // ExtendedPosition p_own;
-                    // p_own.pos = m_ri.m_history[MOD_SPOKES(pol.angle)].pos;  // get the position at receive time
                     target.position = setup.polar2pos(&pol, &mut p_own); // using own ship location from the time of reception, only lat and lon
                     target.position.dlat_dt = 0.;
                     target.position.dlon_dt = 0.;
@@ -2547,6 +2580,15 @@ impl ArpaTarget {
                     );
                     target.age_rotations = 0;
                 }
+
+                // Now transition to next status
+                target.status = match target.status {
+                    TargetStatus::Acquire0 => TargetStatus::Acquire1,
+                    TargetStatus::Acquire1 => TargetStatus::Acquire2,
+                    TargetStatus::Acquire2 => TargetStatus::Acquire3,
+                    TargetStatus::Acquire3 | TargetStatus::Active => TargetStatus::Active,
+                    _ => TargetStatus::Acquire0,
+                };
 
                 // Kalman filter to  calculate the apostriori local position and speed based on found position (pol)
                 if target.status == TargetStatus::Acquire2

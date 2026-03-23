@@ -6,6 +6,8 @@ use async_trait::async_trait;
 use serde::Serialize;
 use tokio_graceful_shutdown::SubsystemHandle;
 
+#[cfg(feature = "emulator")]
+pub(crate) mod emulator;
 #[cfg(feature = "furuno")]
 pub(crate) mod furuno;
 #[cfg(feature = "garmin")]
@@ -33,6 +35,14 @@ pub(crate) fn create_brand_listeners(
     brands: &mut HashSet<Brand>,
     args: &Cli,
 ) {
+    // When emulator mode is enabled, skip all real radar brands
+    #[cfg(feature = "emulator")]
+    if args.emulator {
+        emulator::new(args, listen_addresses);
+        brands.insert(Brand::Emulator);
+        return;
+    }
+
     #[cfg(feature = "navico")]
     if args.brand.unwrap_or(Brand::Navico) == Brand::Navico {
         navico::new(args, listen_addresses);

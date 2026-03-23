@@ -121,6 +121,14 @@ pub(crate) fn set_heading_true(heading: Option<f64>, source: &str) {
     }
 }
 
+/// Force broadcast the current heading value (for emulator to ensure GUI receives heading)
+pub(crate) fn broadcast_heading(source: &str) {
+    let h = HEADING_TRUE.load(Ordering::Acquire);
+    if !h.is_nan() {
+        broadcast_nav_update("navigation.headingTrue", h, source);
+    }
+}
+
 pub fn get_radar_position() -> Option<GeoPosition> {
     if POSITION_VALID.load(Ordering::Acquire) {
         let lat = POSITION_LAT.load(Ordering::Acquire);

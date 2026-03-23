@@ -91,6 +91,23 @@ impl Locator {
     ) -> Result<(), RadarError> {
         let radars = &self.radars;
 
+        // Handle emulator mode - create radar directly without network discovery
+        #[cfg(feature = "emulator")]
+        if self.args.emulator {
+            log::info!("Emulator mode: creating emulator radar directly");
+            crate::brand::emulator::create_emulator_radar(&self.args, &radars, &subsys);
+
+            // Keep the locator running to handle interface requests
+            loop {
+                tokio::select! {
+                    _ = subsys.on_shutdown_requested() => {
+                        log::debug!("Emulator locator shutdown");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         log::debug!("Entering loop, listening for radars");
         let mut interface_state = InterfaceState {
             active_nic_addresses: Vec::new(),

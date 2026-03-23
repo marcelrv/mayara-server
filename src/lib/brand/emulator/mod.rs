@@ -1,0 +1,104 @@
+use std::net::{Ipv4Addr, SocketAddrV4};
+
+use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
+
+use crate::locator::LocatorAddress;
+use crate::radar::{GeoPosition, RadarInfo, SharedRadars};
+use crate::{Brand, Cli};
+
+mod command;
+mod report;
+mod settings;
+mod world;
+
+// Like HALO radar
+const EMULATOR_SPOKES: usize = 2048;
+const EMULATOR_SPOKE_LEN: usize = 1024;
+
+// Initial position: Sneek, Netherlands
+const EMULATOR_INITIAL_LAT: f64 = 53.18433606795611;
+const EMULATOR_INITIAL_LON: f64 = 5.273436414539474;
+const EMULATOR_HEADING: f64 = 270.0; // West
+
+// Speed in knots (nautical miles per hour)
+const EMULATOR_SPEED_KNOTS: f64 = 2.0;
+
+// Supported ranges in meters
+pub(crate) const EMULATOR_RANGES: &[i32] = &[
+    50, 57, 75, 100, 115, 231, 250, 463, 500, 750, 926, 1000, 1389, 1500, 1852, 2000, 2778, 3000,
+    3704, 4000, 5556, 6000, 7408, 8000, 11112, 12000, 14816, 16000, 22224, 24000, 29632, 36000,
+    44448, 48000, 59264, 64000, 66672, 72000, 74080, 88896,
+];
+
+/// Get the initial position for the emulator, considering static-position override
+pub(crate) fn get_initial_position(args: &Cli) -> (GeoPosition, f64, f64) {
+    if let Some(static_pos) = args.get_static_position() {
+        // Use static position with speed = 0
+        (
+            GeoPosition::new(static_pos.lat, static_pos.lon),
+            static_pos.heading,
+            0.0, // Speed is 0 when using static position
+        )
+    } else {
+        (
+            GeoPosition::new(EMULATOR_INITIAL_LAT, EMULATOR_INITIAL_LON),
+            EMULATOR_HEADING,
+            EMULATOR_SPEED_KNOTS,
+        )
+    }
+}
+
+/// Register emulator brand listener (not used for actual discovery)
+pub(super) fn new(_args: &Cli, _addresses: &mut Vec<LocatorAddress>) {
+    // The emulator doesn't use the normal locator discovery mechanism.
+    // Instead, create_emulator_radar() is called directly from the locator.
+    log::info!("Emulator mode enabled");
+}
+
+/// Create the emulator radar directly (called from locator when --emulator is set)
+pub fn create_emulator_radar(args: &Cli, radars: &SharedRadars, subsys: &SubsystemHandle) {
+    // Check if we already have an emulator radar
+    if radars.is_radar_active_on_nic(&Brand::Emulator, &Ipv4Addr::LOCALHOST) {
+        log::debug!("Emulator radar already exists");
+        return;
+    }
+
+    let fake_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0);
+
+    let info = RadarInfo::new(
+        radars,
+        args,
+        Brand::Emulator,
+        Some("EMU00001"),
+        None,
+        16, // 16 pixel values (4 bits like HALO)
+        EMULATOR_SPOKES,
+        EMULATOR_SPOKE_LEN,
+        fake_addr,
+        Ipv4Addr::LOCALHOST,
+        fake_addr, // spoke_data_addr (unused)
+        fake_addr, // report_addr (unused)
+        fake_addr, // send_command_addr (unused)
+        |id, tx| settings::new(id, tx, args),
+        true, // doppler (like HALO)
+    );
+
+    if let Some(mut info) = radars.add(info) {
+        log::info!("Emulator radar '{}' created", info.key());
+
+        // Set the ranges
+        let ranges = crate::radar::range::Ranges::new_by_distance(
+            &EMULATOR_RANGES.iter().map(|&r| r).collect::<Vec<_>>(),
+        );
+        info.set_ranges(ranges);
+        radars.update(&mut info);
+
+        // Start the report receiver (spoke generator)
+        let report_name = info.key() + " reports";
+        let report_receiver = report::EmulatorReportReceiver::new(args, info, radars.clone());
+
+        subsys.start(SubsystemBuilder::new(report_name, |s| {
+            report_receiver.run(s)
+        }));
+    }
+}

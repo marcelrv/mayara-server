@@ -232,6 +232,16 @@ impl GeoPosition {
         GeoPosition { lat, lon }
     }
 
+    /// Get latitude in degrees
+    pub fn lat(&self) -> f64 {
+        self.lat
+    }
+
+    /// Get longitude in degrees
+    pub fn lon(&self) -> f64 {
+        self.lon
+    }
+
     /// Calculate a new position from this position given a bearing and distance
     /// bearing: bearing in radians (0 = north, clockwise positive)
     /// distance: distance in meters

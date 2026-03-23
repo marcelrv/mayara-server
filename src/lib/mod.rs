@@ -108,6 +108,10 @@ pub struct Cli {
     /// Pass AIS targets from Signal K server to GUI clients
     #[arg(long, default_value_t = false)]
     pub pass_ais: bool,
+
+    /// Use emulator radar instead of real radar discovery
+    #[arg(long, default_value_t = false)]
+    pub emulator: bool,
 }
 
 /// Static position data (latitude, longitude, heading)
@@ -141,6 +145,7 @@ pub enum Brand {
     Garmin,
     Navico,
     Raymarine,
+    Emulator,
 }
 
 impl Brand {
@@ -150,6 +155,7 @@ impl Brand {
             Self::Garmin => "gar",
             Self::Navico => "nav",
             Self::Raymarine => "ray",
+            Self::Emulator => "emu",
         }
     }
 }
@@ -161,6 +167,7 @@ impl Into<Brand> for &str {
             "garmin" => Brand::Garmin,
             "navico" => Brand::Navico,
             "raymarine" => Brand::Raymarine,
+            "emulator" => Brand::Emulator,
             _ => panic!("Invalid brand"),
         }
     }
@@ -176,6 +183,7 @@ impl Serialize for Brand {
             Self::Garmin => serializer.serialize_str("Garmin"),
             Self::Navico => serializer.serialize_str("Navico"),
             Self::Raymarine => serializer.serialize_str("Raymarine"),
+            Self::Emulator => serializer.serialize_str("Emulator"),
         }
     }
 }
@@ -187,6 +195,7 @@ impl std::fmt::Display for Brand {
             Self::Garmin => write!(f, "Garmin"),
             Self::Navico => write!(f, "Navico"),
             Self::Raymarine => write!(f, "Raymarine"),
+            Self::Emulator => write!(f, "Emulator"),
         }
     }
 }
