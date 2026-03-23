@@ -31,8 +31,9 @@ use super::super::{Message, Web, WebSocket, WebSocketUpgrade};
 use mayara::{
     InterfaceApi, navdata,
     radar::{
-        Legend, RadarError, RadarInfo, SharedRadars,
+        GeoPosition, Legend, RadarError, RadarInfo, SharedRadars,
         settings::{BareControlValue, Control, ControlId, ControlValue, RadarControlValue},
+        target::MarpaRequest,
     },
     stream::{ActiveSubscriptions, Desubscription, SignalKDelta, Subscribe, Subscription},
 };
@@ -581,7 +582,7 @@ async fn set_control_value(
 
 /// Request body for manual target acquisition
 /// Supports two modes: lat/lon or bearing/distance from radar
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, Debug, ToSchema)]
 #[serde(rename_all = "camelCase")]
 #[schema(example = json!({
     "bearing": 0.7854,
@@ -645,51 +646,87 @@ async fn acquire_target(
     State(state): State<Web>,
     extract::Json(request): extract::Json<AcquireTargetRequest>,
 ) -> Response {
-    // Support two modes: bearing/distance or lat/lon
-    // Bearing is in radians
-    let result = if let (Some(bearing), Some(distance)) = (request.bearing, request.distance) {
-        log::info!(
-            "POST acquire target at bearing {:.1}° ({:.3} rad), distance {:.0}m for radar {}",
-            bearing.to_degrees(),
-            bearing,
-            distance,
-            radar_id
-        );
-        state.radars.acquire_target_at_bearing_distance(
-            &radar_id,
-            bearing,
-            distance,
-        )
-    } else if let (Some(lat), Some(lon)) = (request.latitude, request.longitude) {
-        log::info!(
-            "POST acquire target at ({:.6}, {:.6}) for radar {}",
-            lat,
-            lon,
-            radar_id
-        );
-        state.radars.acquire_target_at_position(
-            &radar_id,
-            lat,
-            lon,
-        )
-    } else {
-        return (
-            StatusCode::BAD_REQUEST,
-            "Either bearing/distance or latitude/longitude must be provided".to_string(),
-        )
-            .into_response();
+    log::info!("MARPA acquire_target request for radar {}: {:?}", radar_id, request);
+
+    // Verify radar exists
+    let radar = match state.radars.get_by_key(&radar_id) {
+        Some(r) => r,
+        None => return RadarError::NoSuchRadar(radar_id).into_response(),
     };
 
-    match result {
-        Ok(target_id) => {
-            let response = AcquireTargetResponse {
-                target_id,
-                radar_id,
-            };
-            Json(response).into_response()
+    // Get MARPA channel
+    let marpa_tx = match state.radars.get_marpa_tx() {
+        Some(tx) => tx,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Target tracking not enabled (use --targets arpa)".to_string(),
+            )
+                .into_response();
         }
-        Err(e) => e.into_response(),
+    };
+
+    // Compute target position from either lat/lon or bearing/distance
+    let position = match (request.latitude, request.longitude, request.bearing, request.distance) {
+        (Some(lat), Some(lon), _, _) => {
+            // Direct lat/lon provided
+            GeoPosition::new(lat, lon)
+        }
+        (_, _, Some(bearing), Some(distance)) => {
+            // Bearing/distance from radar - need radar position
+            let radar_pos = match navdata::get_radar_position() {
+                Some(pos) => pos,
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "No radar position available for bearing/distance conversion".to_string(),
+                    )
+                        .into_response();
+                }
+            };
+            radar_pos.position_from_bearing(bearing, distance)
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Must provide either latitude/longitude or bearing/distance".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    // Get radar position for API conversion (bearing/distance calculation)
+    let radar_position = navdata::get_radar_position();
+
+    // Create MARPA request
+    let marpa_request = MarpaRequest {
+        radar_key: radar.key(),
+        position,
+        radar_position,
+        time: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        size_meters: 30.0, // Default ship size estimate
+    };
+
+    // Send to tracker
+    if let Err(e) = marpa_tx.try_send(marpa_request) {
+        log::error!("Failed to send MARPA request: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to send acquisition request".to_string(),
+        )
+            .into_response();
     }
+
+    // Return success - target will be tracked and updates broadcast via delta stream
+    // The actual target ID will be assigned by the tracker after confirmation
+    Json(AcquireTargetResponse {
+        target_id: 0, // Will be assigned when target is confirmed
+        radar_id: radar.key(),
+    })
+    .into_response()
 }
 
 #[utoipa::path(
@@ -1080,21 +1117,7 @@ async fn ws_signalk_delta(
             sk_delta.add_updates(rcvs);
         }
 
-        // Send all known ARPA targets to the new client
-        if let Some(radar_position) = navdata::get_radar_position() {
-            let target_manager = radars.get_target_manager();
-            let targets_by_radar = target_manager.get_all_targets_by_radar(&radar_position);
-            let mut target_count = 0;
-            for (radar_key, targets) in targets_by_radar {
-                for (target_id, target_api) in targets {
-                    sk_delta.add_target_update(&radar_key, target_id, Some(target_api));
-                    target_count += 1;
-                }
-            }
-            if target_count > 0 {
-                log::info!("Sending {} ARPA targets to new client", target_count);
-            }
-        }
+        // Note: ARPA target tracking not currently implemented
 
         // AIS vessels are NOT sent on initial connection.
         // They are sent when the client subscribes to "vessels.*"

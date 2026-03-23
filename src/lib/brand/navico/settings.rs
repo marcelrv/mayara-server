@@ -113,11 +113,6 @@ pub fn update_when_model_known(
         controls.set_user_name(user_name);
     }
 
-    // Add MergeTargets for dual radar setups (HALO A/B)
-    if radar_info.dual.is_some() {
-        controls.add(new_list(ControlId::MergeTargets, &["Off", "On"]));
-    }
-
     if model == Model::HALO {
         controls.add(new_list(ControlId::Mode, HaloMode::VARIANTS));
         controls.add(new_list(

@@ -1,311 +1,383 @@
-use nalgebra::{SMatrix, SVector};
-use std::f64::consts::PI;
+//! Kalman filter for target motion estimation.
+//!
+//! Implements a 4-state Extended Kalman Filter for tracking target position
+//! and velocity in geographic coordinates.
+//!
+//! Based on radar_pi implementation by Douwe Fokkema.
+//! See: "An Introduction to the Kalman Filter" by Greg Welch and Gary Bishop
 
-use super::spoke_coords::SpokeBearing;
+use nalgebra::{SMatrix, SVector};
+
+use super::{METERS_PER_DEGREE_LATITUDE, meters_per_degree_longitude};
 use crate::radar::GeoPosition;
 
-// NOISE controls how quickly targets can change heading in the Kalman filter.
-// Lower values make targets go straighter - good for stable targets.
-// Higher values allow targets to make curves - good for maneuvering targets.
-const NOISE_NORMAL: f64 = 0.015;
-const NOISE_MEDIUM: f64 = 0.1;
-const NOISE_FAST: f64 = 1.0;
-
-// const CONVERT: f64 = (((1. / 1852.) / 1852.) / 60.) / 60.; // converts meters ^ 2 to degrees ^ 2
-
-type Matrix2x2 = SMatrix<f64, 2, 2>;
+type Vector4 = SVector<f64, 4>;
 type Matrix4x4 = SMatrix<f64, 4, 4>;
+type Matrix2x2 = SMatrix<f64, 2, 2>;
 type Matrix4x2 = SMatrix<f64, 4, 2>;
 type Matrix2x4 = SMatrix<f64, 2, 4>;
+type Vector2 = SVector<f64, 2>;
 
-/// Polar coordinates relative to True North (geographic bearing).
-/// The bearing is measured from True North (0 = North), clockwise.
-#[derive(Debug, Clone, Copy)]
-pub struct Polar {
-    /// Bearing relative to True North in spokes
-    pub bearing: SpokeBearing,
-    /// Range in pixels
-    pub r: i32,
-    /// Time of measurement
-    pub time: u64,
-}
+/// Process noise - allowed covariance of target speed change.
+/// Critical for performance: lower = straighter tracks, higher = allows curves.
+/// Value 0.015 allows for reasonable maneuvering targets.
+const PROCESS_NOISE: f64 = 0.015;
 
-impl Polar {
-    pub fn new(bearing: SpokeBearing, r: i32, time: u64) -> Self {
-        Polar { bearing, r, time }
-    }
 
-    /// Create a Polar from raw values (for backward compatibility during migration)
-    pub fn from_raw(bearing: i32, r: i32, time: u64, spokes: u32) -> Self {
-        Polar {
-            bearing: SpokeBearing::new(bearing, spokes),
-            r,
-            time,
-        }
-    }
-
-    /// Create a zero Polar (bearing=0, r=0, time=0)
-    pub fn zero() -> Self {
-        Polar {
-            bearing: SpokeBearing::from_raw(0),
-            r: 0,
-            time: 0,
-        }
-    }
-
-    /// Get bearing in radians [0, 2π)
-    pub fn bearing_in_rad(&self, spokes_per_revolution: f64) -> f64 {
-        self.bearing.to_radians(spokes_per_revolution as u32)
-    }
-
-    /// Check if bearing is between start and end (inclusive for start, exclusive for end)
-    pub fn bearing_is_between(&self, start: SpokeBearing, end: SpokeBearing, spokes: u32) -> bool {
-        let bearing = self.bearing.raw().rem_euclid(spokes);
-        let start = start.raw().rem_euclid(spokes);
-        let end = end.raw().rem_euclid(spokes);
-
-        if start <= end {
-            // Normal case: no wrap-around
-            bearing >= start && bearing < end
-        } else {
-            // Wrap-around case: range spans 0 (e.g., 1812..276 means 1812..2048 and 0..276)
-            bearing >= start || bearing < end
-        }
-    }
-
-    // === Raw access methods for contour tracing (temporary during migration) ===
-
-    /// Get bearing as raw i32 (for contour tracing code)
-    #[inline]
-    pub fn raw_bearing(&self) -> i32 {
-        self.bearing.as_i32()
-    }
-
-    /// Set bearing from raw i32 (for contour tracing code)
-    #[inline]
-    pub fn set_raw_bearing(&mut self, value: i32, spokes: u32) {
-        self.bearing = SpokeBearing::new(value, spokes);
-    }
-
-    /// Add an offset to bearing (for contour tracing code)
-    #[inline]
-    pub fn add_bearing(&mut self, offset: i32, spokes: u32) {
-        self.bearing = self.bearing.add(offset, spokes);
-    }
-}
-
-pub struct LocalPosition {
-    pub pos: GeoPosition,
-    pub dlat_dt: f64,      // latitude  of speed vector, m/s
-    pub dlon_dt: f64,      // longitude of speed vector, m/s
-    pub sd_speed_m_s: f64, // standard deviation of the speed, m/s
-}
-
-impl LocalPosition {
-    pub fn new(pos: GeoPosition, dlat_dt: f64, dlon_dt: f64) -> Self {
-        Self {
-            pos,
-            dlat_dt,
-            dlon_dt,
-            sd_speed_m_s: 0.,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+/// 4-state Kalman filter: [lat, lon, dlat/dt, dlon/dt]
+///
+/// State vector (all in meters from radar position):
+/// - x[0]: latitude offset (meters)
+/// - x[1]: longitude offset (meters)
+/// - x[2]: latitude velocity (m/s)
+/// - x[3]: longitude velocity (m/s)
 pub struct KalmanFilter {
-    a: Matrix4x4,
-    at: Matrix4x4,
-    w: Matrix4x2,
-    wt: Matrix2x4,
-    h: Matrix2x4,
-    ht: Matrix4x2,
+    /// State vector [lat_m, lon_m, vlat_m/s, vlon_m/s]
+    state: Vector4,
+    /// Error covariance matrix P
     p: Matrix4x4,
+    /// Process noise covariance matrix Q (2x2 for velocity noise)
     q: Matrix2x2,
+    /// Measurement noise covariance matrix R (2x2 for position noise)
     r: Matrix2x2,
-    k: Matrix4x2,
-    i: Matrix4x4,
-    pub spokes_per_revolution: f64,
-    noise: f64,
+    /// Last update time (millis since epoch)
+    last_time: u64,
+    /// Whether filter has been initialized
+    initialized: bool,
+    /// Reference latitude for coordinate conversion
+    ref_lat: f64,
+    /// Reference longitude for coordinate conversion
+    ref_lon: f64,
 }
 
 impl KalmanFilter {
-    // as the measurement to state transformation is non-linear, the extended Kalman filter is used
-    // as the state transformation is linear, the state transformation matrix F is equal to the jacobian A
-    // f is the state transformation function Xk <- Xk-1
-    // Ai,j is jacobian matrix dfi / dxj
+    /// Create a new uninitialized Kalman filter
+    pub fn new() -> Self {
+        // Initial P matrix - position uncertainty ~20m, velocity ~4 m/s
+        let mut p = Matrix4x4::zeros();
+        p[(0, 0)] = 20.0; // lat position variance (m²)
+        p[(1, 1)] = 20.0; // lon position variance (m²)
+        p[(2, 2)] = 4.0;  // lat velocity variance (m/s)²
+        p[(3, 3)] = 4.0;  // lon velocity variance (m/s)²
 
-    pub fn new(spokes_per_revolution: usize) -> Self {
-        let mut f = KalmanFilter {
-            a: Matrix4x4::identity(),
-            at: Matrix4x4::identity(),
-            w: Matrix4x2::zeros(),
-            wt: Matrix2x4::zeros(),
-            h: Matrix2x4::zeros(),
-            ht: Matrix4x2::zeros(),
-            p: Matrix4x4::zeros(),
-            q: Matrix2x2::zeros(),
-            r: Matrix2x2::zeros(),
-            k: Matrix4x2::zeros(),
-            i: Matrix4x4::identity(),
-            spokes_per_revolution: spokes_per_revolution as f64,
-            noise: NOISE_NORMAL,
-        };
-        f.reset_filter();
-        f
-    }
+        // Q - process noise (velocity can change)
+        let mut q = Matrix2x2::zeros();
+        q[(0, 0)] = PROCESS_NOISE; // lat velocity noise (m/s)²
+        q[(1, 1)] = PROCESS_NOISE; // lon velocity noise (m/s)²
 
-    /// Set the noise value for the Kalman filter.
-    /// Use NOISE_NORMAL (0.015) for stable targets, NOISE_FAST (1.0) for maneuvering targets.
-    pub fn set_noise(&mut self, noise: f64) {
-        if (self.noise - noise).abs() > f64::EPSILON {
-            self.noise = noise;
-            // Update Q matrix with new noise value
-            self.q[(0, 0)] = noise;
-            self.q[(1, 1)] = noise;
+        // R - measurement noise (radar position accuracy)
+        // Higher values trust predictions more, lower values trust measurements more
+        let mut r = Matrix2x2::zeros();
+        r[(0, 0)] = 25.0; // lat measurement variance (m²) ~5m std dev
+        r[(1, 1)] = 25.0; // lon measurement variance (m²) ~5m std dev
+
+        KalmanFilter {
+            state: Vector4::zeros(),
+            p,
+            q,
+            r,
+            last_time: 0,
+            initialized: false,
+            ref_lat: 0.0,
+            ref_lon: 0.0,
         }
     }
 
-    /// Get noise value for Normal ARPA detect mode (max 25 kn)
-    pub fn noise_normal() -> f64 {
-        NOISE_NORMAL
+    /// Initialize filter with first measurement
+    pub fn init(&mut self, position: GeoPosition, time: u64) {
+        self.init_with_uncertainty(position, time, 20.0);
     }
 
-    /// Get noise value for Medium ARPA detect mode (max 40 kn)
-    pub fn noise_medium() -> f64 {
-        NOISE_MEDIUM
-    }
+    /// Initialize filter with custom position uncertainty (for MARPA targets)
+    /// position_variance should be in m² (e.g., 625 gives ~50m uncertainty)
+    pub fn init_with_uncertainty(&mut self, position: GeoPosition, time: u64, position_variance: f64) {
+        self.ref_lat = position.lat();
+        self.ref_lon = position.lon();
+        // Initial state is at origin (0,0) in local coordinates with zero velocity
+        self.state = Vector4::zeros();
 
-    /// Get noise value for Fast ARPA detect mode (max 50 kn)
-    pub fn noise_fast() -> f64 {
-        NOISE_FAST
-    }
-
-    pub fn reset_filter(&mut self) {
-        // reset the filter to use  it for a new case
-        self.a = Matrix4x4::identity();
-        self.at = Matrix4x4::identity();
-
-        // Jacobian matrix of partial derivatives dfi / dwj
-        self.w = Matrix4x2::zeros();
-        self.w[(2, 0)] = 1.;
-        self.w[(3, 1)] = 1.;
-
-        // transpose of W
-        self.wt = self.w.transpose();
-
-        // Observation matrix, jacobian of observation function h
-        // dhi / dvj
-        // angle = atan2 (lat,lon) * self.spokes_per_revolution / (2 * pi) + v1
-        // r = sqrt(x * x + y * y) + v2
-        // v is measurement noise
-        self.h = Matrix2x4::zeros();
-
-        // Transpose of observation matrix
-        self.ht = Matrix4x2::zeros();
-
-        // Jacobian V, dhi / dvj
-        // As V is the identity matrix, it is left out of the calculation of the Kalman gain
-
-        // P estimate error covariance
-        // initial values follow
-        // P(1, 1) = .0000027 * range * range;   ???
+        // Reset P to initial uncertainty
         self.p = Matrix4x4::zeros();
-        self.p[(0, 0)] = 20.;
-        self.p[(1, 1)] = 20.;
-        self.p[(2, 2)] = 4.;
-        self.p[(3, 3)] = 4.;
-        // P(1, 1) = .00027 * range * range;   ???
+        self.p[(0, 0)] = position_variance;
+        self.p[(1, 1)] = position_variance;
+        self.p[(2, 2)] = 4.0;
+        self.p[(3, 3)] = 4.0;
 
-        // Q Process noise covariance matrix
-        //((((1. / 1852.) / 1852.) / 60.) / 60.) // converts meters ^ 2 to degrees ^ 2
-        self.q[(0, 0)] = self.noise;
-        // variance in lat speed, (m / sec)2. This variable controls the rate of turn of targets and how fast targets pick up speed
-        self.q[(1, 1)] = self.noise;
-        // variance in lon speed, (m / sec)2. This variable controls the rate of turn of targets and how fast targets pick up speed
-
-        // R measurement noise covariance matrix
-        self.r[(0, 0)] = 100.0; // variance in the angle 3.0
-        self.r[(1, 1)] = 25.; // variance in radius  .5
+        self.last_time = time;
+        self.initialized = true;
     }
 
-    pub fn predict(&mut self, xx: &mut LocalPosition, delta_time: f64) {
-        let mut x = SMatrix::<f64, 4, 1>::new(xx.pos.lat, xx.pos.lon, xx.dlat_dt, xx.dlon_dt);
-        self.a[(0, 2)] = delta_time; // time in seconds
-        self.a[(1, 3)] = delta_time;
-
-        self.at[(2, 0)] = delta_time;
-        self.at[(3, 1)] = delta_time;
-
-        x = self.a * x;
-        xx.pos.lat = x[(0, 0)];
-        xx.pos.lon = x[(1, 0)];
-        xx.dlat_dt = x[(2, 0)];
-        xx.dlon_dt = x[(3, 0)];
-        xx.sd_speed_m_s = ((self.p[(2, 2)] + self.p[(3, 3)]) / 2.).sqrt(); // rough approximation of standard dev of speed
+    /// Check if filter has been initialized
+    #[allow(dead_code)]
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
     }
 
-    pub fn update_p(&mut self) {
-        // calculate apriori P
-        // separated from the predict to prevent the update being done both in pass1 and pass2
-
-        self.p = self.a * self.p * self.at + self.w * self.q * self.wt;
+    /// Convert geographic position to local meters from reference
+    fn geo_to_local(&self, position: &GeoPosition) -> (f64, f64) {
+        let dlat = (position.lat() - self.ref_lat) * METERS_PER_DEGREE_LATITUDE;
+        let dlon = (position.lon() - self.ref_lon) * meters_per_degree_longitude(&self.ref_lat);
+        (dlat, dlon)
     }
 
-    pub fn set_measurement(
-        &mut self,
-        pol: &mut Polar,
-        local_position: &mut LocalPosition,
-        expected: &Polar,
-        scale: f64,
-    ) {
-        // pol measured angular position
-        // x expected local position, this is the position returned and to be used
-        // expected, same but in polar coordinates
-        let q_sum: f64 = local_position.pos.lon * local_position.pos.lon
-            + local_position.pos.lat * local_position.pos.lat;
+    /// Convert local meters to geographic position
+    fn local_to_geo(&self, lat_m: f64, lon_m: f64) -> GeoPosition {
+        let lat = self.ref_lat + lat_m / METERS_PER_DEGREE_LATITUDE;
+        let lon = self.ref_lon + lon_m / meters_per_degree_longitude(&self.ref_lat);
+        GeoPosition::new(lat, lon)
+    }
 
-        let c: f64 = self.spokes_per_revolution / (2. * PI);
-        self.h[(0, 0)] = -c * local_position.pos.lon / q_sum;
-        self.h[(0, 1)] = c * local_position.pos.lat / q_sum;
+    /// Build state transition matrix A for given time delta
+    fn state_transition_matrix(delta_t: f64) -> Matrix4x4 {
+        // State transition: position += velocity * dt
+        // [lat']     [1  0  dt  0 ] [lat ]
+        // [lon']  =  [0  1  0   dt] [lon ]
+        // [vlat']    [0  0  1   0 ] [vlat]
+        // [vlon']    [0  0  0   1 ] [vlon]
+        Matrix4x4::new(
+            1.0, 0.0, delta_t, 0.0, 0.0, 1.0, 0.0, delta_t, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        )
+    }
 
-        let q_sum = q_sum.sqrt();
-        self.h[(1, 0)] = local_position.pos.lat / q_sum * scale;
-        self.h[(1, 1)] = local_position.pos.lon / q_sum * scale;
+    /// Build W matrix (maps process noise to state)
+    /// Process noise only affects velocity, not position directly
+    fn process_noise_mapping() -> Matrix4x2 {
+        // W maps velocity noise to state
+        // Only velocity states are affected by process noise
+        Matrix4x2::new(
+            0.0, 0.0, // lat position not directly affected
+            0.0, 0.0, // lon position not directly affected
+            1.0, 0.0, // lat velocity affected by noise
+            0.0, 1.0, // lon velocity affected by noise
+        )
+    }
 
-        self.ht = self.h.transpose();
+    /// Build observation matrix H (observes only position, not velocity)
+    fn observation_matrix() -> Matrix2x4 {
+        Matrix2x4::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    }
 
-        // Z is difference between measured and expected bearing
-        let a = expected
-            .bearing
-            .diff(&pol.bearing, self.spokes_per_revolution as u32) as f64;
-        let b = (pol.r - expected.r) as f64;
-        let z = SMatrix::<f64, 2, 1>::new(a, b);
+    /// Predict position at given time without updating filter state
+    pub fn predict(&self, time: u64) -> GeoPosition {
+        if !self.initialized || time <= self.last_time {
+            return self.local_to_geo(self.state[0], self.state[1]);
+        }
 
-        let mut x = SVector::<f64, 4>::new(
-            local_position.pos.lat,
-            local_position.pos.lon,
-            local_position.dlat_dt,
-            local_position.dlon_dt,
-        );
+        let delta_t = (time - self.last_time) as f64 / 1000.0;
+        let a = Self::state_transition_matrix(delta_t);
+        let predicted = a * self.state;
 
-        // calculate Kalman gain
-        self.k = self.p
-            * self.ht
-            * (((self.h * self.p * self.ht) + self.r)
-                .try_inverse()
-                .unwrap());
+        self.local_to_geo(predicted[0], predicted[1])
+    }
 
-        // calculate apostriori expected position
-        x = x + self.k * z;
-        local_position.pos.lat = x[(0, 0)];
-        local_position.pos.lon = x[(1, 0)];
-        local_position.dlat_dt = x[(2, 0)];
-        local_position.dlon_dt = x[(3, 0)];
+    /// Update P covariance matrix after prediction (separate from predict for timing)
+    fn update_p(&mut self, delta_t: f64) {
+        let a = Self::state_transition_matrix(delta_t);
+        let at = a.transpose();
+        let w = Self::process_noise_mapping();
+        let wt = w.transpose();
 
-        // update covariance P
-        self.p = (self.i - self.k * self.h) * self.p;
-        local_position.sd_speed_m_s = ((self.p[(2, 2)] + self.p[(3, 3)]) / 2.).sqrt();
-        // rough approximation of standard dev of speed
+        // P = A * P * AT + W * Q * WT
+        self.p = a * self.p * at + w * self.q * wt;
+    }
+
+    /// Update filter with new measurement, returns (sog_ms, cog_rad)
+    pub fn update(&mut self, position: GeoPosition, time: u64) -> (f64, f64) {
+        if !self.initialized {
+            self.init(position, time);
+            return (0.0, 0.0);
+        }
+
+        if time <= self.last_time {
+            return self.get_motion();
+        }
+
+        let delta_t = (time - self.last_time) as f64 / 1000.0;
+
+        // Predict step - advance state by dt
+        let a = Self::state_transition_matrix(delta_t);
+        let predicted_state = a * self.state;
+
+        // Update P with process noise
+        self.update_p(delta_t);
+
+        // Measurement in local coordinates
+        let (z_lat, z_lon) = self.geo_to_local(&position);
+        let z = Vector2::new(z_lat, z_lon);
+
+        // Observation matrix
+        let h = Self::observation_matrix();
+        let ht = h.transpose();
+
+        // Innovation (measurement residual)
+        let y = z - h * predicted_state;
+
+        // Kalman gain: K = P * HT * (H * P * HT + R)^-1
+        let s = h * self.p * ht + self.r;
+        let s_inv = s.try_inverse().unwrap_or(Matrix2x2::identity());
+        let k: Matrix4x2 = self.p * ht * s_inv;
+
+        // Updated state: X = X + K * y
+        self.state = predicted_state + k * y;
+
+        // Updated covariance: P = (I - K * H) * P
+        let i_kh = Matrix4x4::identity() - k * h;
+        self.p = i_kh * self.p;
+
+        self.last_time = time;
+
+        self.get_motion()
+    }
+
+    /// Get current SOG (m/s) and COG (radians, 0 = North) from velocity state
+    pub fn get_motion(&self) -> (f64, f64) {
+        // State is already in meters and m/s
+        let lat_vel_ms = self.state[2];
+        let lon_vel_ms = self.state[3];
+
+        let sog = (lat_vel_ms * lat_vel_ms + lon_vel_ms * lon_vel_ms).sqrt();
+
+        // COG: atan2(east_velocity, north_velocity) gives bearing from north
+        let cog = lon_vel_ms.atan2(lat_vel_ms);
+        // Normalize to [0, 2π)
+        let cog = if cog < 0.0 {
+            cog + 2.0 * std::f64::consts::PI
+        } else {
+            cog
+        };
+
+        (sog, cog)
+    }
+
+    /// Get current position estimate
+    #[allow(dead_code)]
+    pub fn get_position(&self) -> GeoPosition {
+        self.local_to_geo(self.state[0], self.state[1])
+    }
+
+    /// Get position uncertainty in meters (approximate)
+    pub fn get_uncertainty(&self) -> f64 {
+        // P matrix is already in meters, so variance is in m²
+        let lat_var = self.p[(0, 0)];
+        let lon_var = self.p[(1, 1)];
+
+        // Return 2-sigma uncertainty (95% confidence)
+        2.0 * (lat_var + lon_var).sqrt()
+    }
+
+    /// Get speed uncertainty in m/s
+    #[allow(dead_code)]
+    pub fn get_speed_uncertainty(&self) -> f64 {
+        // Rough approximation of standard deviation of speed
+        ((self.p[(2, 2)] + self.p[(3, 3)]) / 2.0).sqrt()
+    }
+
+    /// Set process noise level (higher = more maneuverable targets)
+    #[allow(dead_code)]
+    pub fn set_process_noise(&mut self, noise: f64) {
+        self.q[(0, 0)] = noise;
+        self.q[(1, 1)] = noise;
+    }
+}
+
+impl Default for KalmanFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_init_and_predict() {
+        let mut kf = KalmanFilter::new();
+        let pos = GeoPosition::new(52.0, 4.0);
+        kf.init(pos, 0);
+
+        // Predict at same time should return same position
+        let pred = kf.predict(0);
+        assert!((pred.lat() - 52.0).abs() < 1e-6);
+        assert!((pred.lon() - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_update_computes_velocity() {
+        let mut kf = KalmanFilter::new();
+
+        // First position
+        let pos1 = GeoPosition::new(52.0, 4.0);
+        kf.init(pos1, 0);
+
+        // Move north by ~111 meters (0.001 degrees lat) in 1 second
+        // True speed would be ~111 m/s
+        // With high measurement noise (R=25m²), filter will be conservative
+        let pos2 = GeoPosition::new(52.001, 4.0);
+        let (sog1, _) = kf.update(pos2, 1000);
+
+        // First update: Kalman filter is conservative due to high measurement noise (R=25m²)
+        // With conservative settings, speed builds up gradually over multiple updates
+        assert!(sog1 > 5.0 && sog1 < 150.0, "SOG after 1st update was {}", sog1);
+
+        // Continue moving north at same rate
+        let pos3 = GeoPosition::new(52.002, 4.0);
+        let (sog2, _) = kf.update(pos3, 2000);
+
+        // Speed should increase as filter gains confidence
+        assert!(sog2 > sog1 && sog2 < 150.0, "SOG after 2nd update was {}", sog2);
+
+        // More updates to let filter converge
+        let pos4 = GeoPosition::new(52.003, 4.0);
+        let (sog3, cog) = kf.update(pos4, 3000);
+
+        // Speed continues to increase toward true value
+        assert!(sog3 > sog2 && sog3 < 150.0, "SOG after 3rd update was {}", sog3);
+
+        // COG should be approximately 0 (north)
+        assert!(cog.abs() < 0.2 || (cog - 2.0 * std::f64::consts::PI).abs() < 0.2,
+            "COG should be north: {}", cog);
+    }
+
+    #[test]
+    fn test_slow_target() {
+        let mut kf = KalmanFilter::new();
+
+        // A target moving at 5 m/s (~10 knots) north
+        // In 3 seconds, moves ~15 meters = ~0.000135 degrees
+        let pos1 = GeoPosition::new(52.0, 4.0);
+        kf.init(pos1, 0);
+
+        // Move at 5 m/s for 3 seconds
+        let delta_deg = 15.0 / METERS_PER_DEGREE_LATITUDE;
+        let pos2 = GeoPosition::new(52.0 + delta_deg, 4.0);
+        let (sog1, _) = kf.update(pos2, 3000);
+
+        // Filter should show some speed
+        assert!(sog1 > 1.0 && sog1 < 20.0, "SOG for slow target was {}", sog1);
+    }
+
+    #[test]
+    fn test_uncertainty_decreases() {
+        let mut kf = KalmanFilter::new();
+
+        let pos = GeoPosition::new(52.0, 4.0);
+        kf.init(pos, 0);
+
+        let initial_uncertainty = kf.get_uncertainty();
+
+        // Multiple consistent updates should decrease uncertainty
+        for i in 1..5 {
+            let t = i * 3000;
+            let delta = (i as f64) * 0.0001;
+            let pos = GeoPosition::new(52.0 + delta, 4.0);
+            kf.update(pos, t);
+        }
+
+        let final_uncertainty = kf.get_uncertainty();
+
+        // Uncertainty should decrease with consistent measurements
+        assert!(final_uncertainty < initial_uncertainty,
+            "Uncertainty should decrease: {} -> {}", initial_uncertainty, final_uncertainty);
     }
 }

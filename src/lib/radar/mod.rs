@@ -14,7 +14,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
 use utoipa::ToSchema;
 
@@ -32,6 +32,7 @@ use crate::radar::settings::{
     ControlDestination, ControlError, ControlId, ControlUpdate, ControlValue, SharedControls,
 };
 use crate::radar::spoke::{GenericSpoke, to_protobuf_spoke};
+use crate::radar::target::{BlobDetector, BlobMessage, MarpaRequest, SpokeContext};
 use crate::radar::trail::TrailBuffer;
 use crate::stream::SignalKDelta;
 use crate::{Brand, Cli, TargetMode};
@@ -108,7 +109,7 @@ impl IntoResponse for RadarError {
 #[serde(rename_all = "camelCase")]
 enum PixelType {
     Normal,
-    TargetBorder,
+    BlobContour,
     DopplerApproaching,
     DopplerReceding,
     History,
@@ -208,13 +209,12 @@ pub struct Legend {
     pub low_return: u8,
     pub medium_return: u8,
     pub strong_return: u8,
-    pub target_border: u8,
     pub pixel_colors: u8,
     pub pixels: Vec<Lookup>,
     /// Color for static background in Static ARPA mode (light grey)
     pub static_background: Option<u8>,
-    /// Weakest return value that is considered a target
-    pub weakest_return: Option<u8>,
+    /// Color for blob contours (light blue) - used for detected targets
+    pub blob_contour: Option<u8>,
 }
 
 /// A geographic position expressed in degrees latitude and longitude.
@@ -538,143 +538,10 @@ impl SharedRadars {
                 info: HashMap::new(),
                 persistent_data: Persistence::new(),
                 sk_client_tx,
-                target_manager: None,
+                blob_tx: None,
+                marpa_tx: None,
             })),
         }
-    }
-
-    /// Get or create the shared target manager for dual radar support
-    pub fn get_target_manager(&self) -> target::manager::SharedTargetManager {
-        let mut radars = self.radars.write().unwrap();
-        if radars.target_manager.is_none() {
-            radars.target_manager = Some(target::manager::SharedTargetManager::new());
-        }
-        radars.target_manager.clone().unwrap()
-    }
-
-    /// Check if dual radar mode is active (2+ transmitting radars with ranges)
-    pub fn is_dual_radar_active(&self) -> bool {
-        let radars = self.radars.read().unwrap();
-        radars
-            .info
-            .values()
-            .filter(|i| !i.ranges.is_empty())
-            .count()
-            >= 2
-    }
-
-    /// Get radar keys sorted by range (short to long)
-    /// Returns (short_range_key, long_range_key) if both are available
-    pub fn get_radar_by_range(&self) -> (Option<String>, Option<String>) {
-        let radars = self.radars.read().unwrap();
-        let mut sorted: Vec<_> = radars
-            .info
-            .values()
-            .filter(|i| !i.ranges.is_empty())
-            .collect();
-
-        // Sort by max range (last range in the list)
-        sorted.sort_by_key(|i| i.ranges.all.last().map(|r| r.distance()).unwrap_or(0));
-
-        let short = sorted.first().map(|i| i.key.clone());
-        let long = if sorted.len() >= 2 {
-            sorted.last().map(|i| i.key.clone())
-        } else {
-            None
-        };
-
-        (short, long)
-    }
-
-    /// Acquire a manual target at the specified geographic position
-    /// Returns the target ID on success
-    pub fn acquire_target_at_position(
-        &self,
-        radar_key: &str,
-        lat: f64,
-        lon: f64,
-    ) -> Result<usize, RadarError> {
-        let radars = self.radars.read().unwrap();
-
-        // Check if target manager exists
-        let target_manager = match radars.target_manager.as_ref() {
-            Some(tm) => tm,
-            None => {
-                return Err(RadarError::InvalidControlId(
-                    "Target tracking not enabled".to_string(),
-                ));
-            }
-        };
-
-        // Get radar info to get spokes_per_revolution
-        let radar_info = radars
-            .info
-            .get(radar_key)
-            .ok_or_else(|| RadarError::NoSuchRadar(radar_key.to_string()))?;
-
-        let spokes_per_revolution = radar_info.spokes_per_revolution as usize;
-        let have_doppler = radar_info.doppler;
-
-        // Create extended position with current time
-        let pos = GeoPosition::new(lat, lon);
-        let time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        let ext_pos = target::ExtendedPosition::new(pos, 0., 0., time, 0., 0.);
-
-        // Acquire the target
-        let target_id = target_manager.acquire_target(
-            radar_key,
-            ext_pos,
-            target::Doppler::Any,
-            spokes_per_revolution,
-            have_doppler,
-        );
-
-        log::info!(
-            "Manual target {} acquired at ({:.6}, {:.6}) for radar '{}'",
-            target_id,
-            lat,
-            lon,
-            radar_key
-        );
-
-        // Get radar position for API conversion
-        let radar_pos = crate::navdata::get_radar_position()
-            .map(|p| GeoPosition::new(p.lat, p.lon))
-            .unwrap_or_else(|| GeoPosition::new(0., 0.));
-
-        // Broadcast the new target immediately so GUI shows it
-        if let Some(managed) = target_manager.get_target(target_id) {
-            let target_api = managed.target.to_api(&radar_pos);
-            let mut delta = SignalKDelta::new();
-            delta.add_target_update(radar_key, target_id, Some(target_api));
-            let _ = radars.sk_client_tx.send(delta);
-        }
-
-        Ok(target_id)
-    }
-
-    /// Acquire a manual target at the specified bearing (radians) and distance from radar
-    /// Returns the target ID on success
-    pub fn acquire_target_at_bearing_distance(
-        &self,
-        radar_key: &str,
-        bearing_rad: f64,
-        distance_m: f64,
-    ) -> Result<usize, RadarError> {
-        // Get radar position from navigation data
-        let radar_pos = crate::navdata::get_radar_position().ok_or_else(|| {
-            RadarError::InvalidControlId("No radar position available".to_string())
-        })?;
-
-        // Calculate target position from bearing and distance
-        let target_pos = radar_pos.position_from_bearing(bearing_rad, distance_m);
-
-        // Use the lat/lon method
-        self.acquire_target_at_position(radar_key, target_pos.lat, target_pos.lon)
     }
 
     // A radar has been found
@@ -832,6 +699,26 @@ impl SharedRadars {
         self.radars.read().unwrap().sk_client_tx.clone()
     }
 
+    /// Get the blob message sender for target tracking
+    pub fn get_blob_tx(&self) -> Option<mpsc::Sender<BlobMessage>> {
+        self.radars.read().unwrap().blob_tx.clone()
+    }
+
+    /// Set the blob message sender for target tracking
+    pub fn set_blob_tx(&self, blob_tx: mpsc::Sender<BlobMessage>) {
+        self.radars.write().unwrap().blob_tx = Some(blob_tx);
+    }
+
+    /// Get the MARPA request sender for manual target acquisition
+    pub fn get_marpa_tx(&self) -> Option<mpsc::Sender<MarpaRequest>> {
+        self.radars.read().unwrap().marpa_tx.clone()
+    }
+
+    /// Set the MARPA request sender for manual target acquisition
+    pub fn set_marpa_tx(&self, marpa_tx: mpsc::Sender<MarpaRequest>) {
+        self.radars.write().unwrap().marpa_tx = Some(marpa_tx);
+    }
+
     /// Request all radars to switch to transmit mode
     /// This sends a Power=Transmit control update to each radar's control handler
     pub fn request_transmit_all(&self) {
@@ -864,7 +751,8 @@ struct Radars {
     pub info: HashMap<String, RadarInfo>,
     pub persistent_data: Persistence,
     sk_client_tx: tokio::sync::broadcast::Sender<SignalKDelta>,
-    pub target_manager: Option<target::manager::SharedTargetManager>,
+    blob_tx: Option<mpsc::Sender<BlobMessage>>,
+    marpa_tx: Option<mpsc::Sender<MarpaRequest>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -925,7 +813,6 @@ impl fmt::Display for DopplerMode {
 }
 
 pub const BLOB_HISTORY_COLORS: u8 = 32;
-const NONE_AND_BORDER_COLORS: u8 = 2;
 const OPAQUE: u8 = 255;
 
 fn default_legend(targets: &TargetMode, doppler: bool, pixel_values: u8) -> Legend {
@@ -933,16 +820,21 @@ fn default_legend(targets: &TargetMode, doppler: bool, pixel_values: u8) -> Lege
         pixels: Vec::new(),
         pixel_colors: 0,
         history_start: 0,
-        target_border: 0,
         doppler_approaching: None,
         doppler_receding: None,
         strong_return: 0,
         medium_return: 0,
         low_return: 0,
         static_background: None,
-        weakest_return: None,
+        blob_contour: None,
     };
 
+    // Calculate extra colors needed for special purposes
+    let arpa_extra_colors: u8 = if *targets == TargetMode::Arpa {
+        2 // static_background, blob_contour
+    } else {
+        0
+    };
     let pixel_values = min(
         pixel_values,
         u8::MAX
@@ -951,7 +843,8 @@ fn default_legend(targets: &TargetMode, doppler: bool, pixel_values: u8) -> Lege
             } else {
                 0
             }
-            - NONE_AND_BORDER_COLORS
+            - 1 // transparent/none color
+            - arpa_extra_colors
             - if doppler { 2 } else { 0 },
     );
 
@@ -1004,12 +897,6 @@ fn default_legend(targets: &TargetMode, doppler: bool, pixel_values: u8) -> Lege
     }
 
     if *targets == TargetMode::Arpa {
-        legend.target_border = legend.pixels.len() as u8;
-        legend.pixels.push(Lookup {
-            r#type: PixelType::TargetBorder,
-            color: Color::from("#00ff00"),
-        });
-
         // Static background color (light grey) for Static ARPA mode
         legend.static_background = Some(legend.pixels.len() as u8);
         legend.pixels.push(Lookup {
@@ -1017,8 +904,12 @@ fn default_legend(targets: &TargetMode, doppler: bool, pixel_values: u8) -> Lege
             color: Color::from("#505050"),
         });
 
-        // Set weakest return threshold (low_return is the weakest visible return)
-        legend.weakest_return = Some(legend.low_return);
+        // Blob contour color (bright red) for detected targets
+        legend.blob_contour = Some(legend.pixels.len() as u8);
+        legend.pixels.push(Lookup {
+            r#type: PixelType::BlobContour,
+            color: Color::from("#ffffff"), // White for testing
+        });
     }
 
     if doppler {
@@ -1081,6 +972,8 @@ pub(crate) struct CommonRadar {
 
     // Common state so we can process spokes
     trails: TrailBuffer,
+    blob_detector: Option<BlobDetector>,
+    blob_tx: Option<mpsc::Sender<BlobMessage>>,
     spoke_message: Option<RadarMessage>,
     spoke_time: u64,
     prev_angle: SpokeBearing,
@@ -1090,25 +983,36 @@ pub(crate) struct CommonRadar {
 
 impl CommonRadar {
     pub fn new(
-        args: &Cli,
+        _args: &Cli,
         key: String,
         info: RadarInfo,
         radars: SharedRadars,
         control_update_rx: broadcast::Receiver<ControlUpdate>,
         replay: bool,
+        blob_tx: Option<mpsc::Sender<BlobMessage>>,
     ) -> Self {
-        // Get shared target manager and broadcast sender for dual radar support
-        let (shared_target_manager, sk_client_tx) = if args.targets == TargetMode::Arpa {
-            (
-                Some(radars.get_target_manager()),
-                Some(radars.get_sk_client_tx()),
-            )
-        } else {
-            (None, None)
-        };
-
-        let trails = TrailBuffer::new(args, &info, shared_target_manager, sk_client_tx);
+        let trails = TrailBuffer::new(&info);
         let spoke_message = None;
+
+        // Create blob detector if ARPA mode is enabled and we have a contour color
+        let blob_detector = info.legend.blob_contour.map(|contour_color| {
+            log::info!(
+                "{}: BlobDetector created with contour_color={}, threshold={}, spokes={}",
+                key,
+                contour_color,
+                info.legend.medium_return,
+                info.spokes_per_revolution
+            );
+            let mut detector = BlobDetector::new(
+                info.spokes_per_revolution,
+                contour_color,
+                info.legend.medium_return,
+            );
+            // Initialize guard zones from current control values
+            detector.set_guard_zone_1(info.controls.guard_zone(&ControlId::GuardZone1));
+            detector.set_guard_zone_2(info.controls.guard_zone(&ControlId::GuardZone2));
+            detector
+        });
 
         let common = CommonRadar {
             key,
@@ -1117,6 +1021,8 @@ impl CommonRadar {
             control_update_rx,
             replay,
             trails,
+            blob_detector,
+            blob_tx,
             spoke_message,
             spoke_time: 0,
             prev_angle: 0,
@@ -1164,6 +1070,19 @@ impl CommonRadar {
                 panic!("{:?} should not be sent to radar receiver", cv)
             }
             ControlDestination::Trail | ControlDestination::Target => {
+                // Update blob detector guard zones when those controls change
+                if let Some(ref mut detector) = self.blob_detector {
+                    match cv.id {
+                        ControlId::GuardZone1 => {
+                            detector.set_guard_zone_1(self.info.controls.guard_zone(&ControlId::GuardZone1));
+                        }
+                        ControlId::GuardZone2 => {
+                            detector.set_guard_zone_2(self.info.controls.guard_zone(&ControlId::GuardZone2));
+                        }
+                        _ => {}
+                    }
+                }
+
                 match self.trails.set_control_value(&self.info.controls, &cv) {
                     Ok(()) => {
                         return Ok(());
@@ -1211,7 +1130,7 @@ impl CommonRadar {
         generic_spoke: GenericSpoke,
     ) {
         if let Some(message) = &mut self.spoke_message {
-            let mut spoke = to_protobuf_spoke(
+            let spoke = to_protobuf_spoke(
                 self.info.spokes_per_revolution,
                 range,
                 angle,
@@ -1221,9 +1140,63 @@ impl CommonRadar {
             );
             self.spoke_count += 1;
             self.max_spoke_length = max(self.max_spoke_length, spoke.data.len() as u32);
-            self.trails
-                .update_trails(&mut spoke, &self.info.legend, &self.info.controls); // Add any pixels representing the trails
-            message.spokes.push(spoke);
+
+            // Process through blob detector if active, otherwise add directly
+            if let Some(ref mut detector) = self.blob_detector {
+                // Process spoke through blob detector (buffers it internally)
+                // Guard zones are updated via control_update_rx when changed
+                let completed_blobs = detector.process_spoke(&spoke);
+
+                // Send completed blobs to tracker
+                if !completed_blobs.is_empty() {
+                    if let Some(ref blob_tx) = self.blob_tx {
+                        // Get max target speed from ArpaDetectMode control
+                        let arpa_mode = self.info.controls.arpa_detect_mode();
+                        let max_target_speed_ms = SpokeContext::max_speed_from_mode(arpa_mode);
+
+                        for blob in &completed_blobs {
+                            let ctx = SpokeContext {
+                                time: spoke.time.unwrap_or(self.spoke_time),
+                                range: spoke.range,
+                                bearing: spoke.bearing.map(|b| b as u16),
+                                lat: spoke.lat,
+                                lon: spoke.lon,
+                                spokes_per_revolution: self.info.spokes_per_revolution,
+                                spoke_len: spoke.data.len(),
+                                angle: spoke.angle as u16,
+                                max_target_speed_ms,
+                            };
+                            let msg = BlobMessage {
+                                radar_key: self.key.clone(),
+                                blob: blob.clone(),
+                                context: ctx,
+                            };
+                            let _ = blob_tx.try_send(msg);
+                        }
+                    }
+
+                    // Draw contours on completed valid-sized blobs
+                    detector.draw_contours(&completed_blobs);
+                }
+
+                // Get ready spokes (those not touched by any active blob)
+                let ready_spokes = detector.get_ready_spokes();
+                for mut ready_spoke in ready_spokes {
+                    // Apply trail processing
+                    self.trails.update_trails(
+                        &mut ready_spoke,
+                        &self.info.legend,
+                        &self.info.controls,
+                    );
+                    message.spokes.push(ready_spoke);
+                }
+            } else {
+                // No blob detection - process directly
+                let mut spoke = spoke;
+                self.trails
+                    .update_trails(&mut spoke, &self.info.legend, &self.info.controls);
+                message.spokes.push(spoke);
+            }
 
             if angle < self.prev_angle {
                 let ms = self.info.full_rotation();

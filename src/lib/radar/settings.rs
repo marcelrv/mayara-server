@@ -90,7 +90,6 @@ pub enum ControlId {
     DopplerAutoTrack,
     ArpaDetectMode,
     ClearTargets,
-    MergeTargets,
     GuardZone1,
     GuardZone2,
     TargetTrails,
@@ -190,7 +189,6 @@ impl ControlId {
             | ControlId::DopplerAutoTrack
             | ControlId::ArpaDetectMode
             | ControlId::ClearTargets
-            | ControlId::MergeTargets
             | ControlId::GuardZone1
             | ControlId::GuardZone2 => Category::Targets,
             ControlId::DopplerTrailsOnly
@@ -254,9 +252,6 @@ impl ControlId {
             }
             ControlId::ArpaDetectMode => {
                 "ARPA detect mode: Normal (25kn max), Medium (40kn), Fast (50kn, maneuvering)"
-            }
-            ControlId::MergeTargets => {
-                "Merge targets from multiple radars into a single shared target list"
             }
             ControlId::DopplerSpeedThreshold => "Threshold speed above which Doppler is applied",
             ControlId::DopplerTrailsOnly => "Convert only Doppler targets to target trails",
@@ -322,7 +317,6 @@ impl ControlId {
             // ControlId::ColorGain => "Color gain",
             ControlId::ShowAis => "Show AIS",
             ControlId::ClearTargets => "Clear targets",
-            ControlId::MergeTargets => "Merge targets",
             ControlId::ClearTrails => "Clear trails",
             ControlId::ColorGain => "Color gain",
             ControlId::DisplayTiming => "Display timing",
@@ -403,7 +397,6 @@ impl ControlId {
             ControlId::ShowAis => ControlDestination::Internal,
             ControlId::GuardZone1 => ControlDestination::Target,
             ControlId::GuardZone2 => ControlDestination::Target,
-            ControlId::MergeTargets => ControlDestination::Target,
             ControlId::Sea => ControlDestination::Command,
             ControlId::SeaState => ControlDestination::Command,
             ControlId::Rain => ControlDestination::Command,
@@ -826,26 +819,30 @@ impl SharedControls {
                     cv_orig,
                     cv
                 );
+                // Handle zone controls specially - they have multiple values and are stored directly
+                // This applies to both Internal and Target destinations (guard zones are Target)
+                if c.item.data_type == ControlDataType::Zone {
+                    let start_angle =
+                        cv.value.as_ref().and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let end_angle = cv.end_value.unwrap_or(0.0);
+                    let start_distance = cv.start_distance.unwrap_or(0.0);
+                    let end_distance = cv.end_distance.unwrap_or(0.0);
+                    self.set_zone(
+                        &cv.id,
+                        start_angle,
+                        end_angle,
+                        start_distance,
+                        end_distance,
+                        cv.enabled,
+                    )
+                    .map_err(|e| RadarError::ControlError(e))?;
+                    // Broadcast the update to the radar so blob detector gets updated
+                    return self.send_to_command_handler(cv, reply_tx);
+                }
+
                 match cv.id.get_destination() {
                     ControlDestination::Internal => {
-                        // Handle zone controls specially - they have multiple values
-                        if c.item.data_type == ControlDataType::Zone {
-                            let start_angle =
-                                cv.value.as_ref().and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let end_angle = cv.end_value.unwrap_or(0.0);
-                            let start_distance = cv.start_distance.unwrap_or(0.0);
-                            let end_distance = cv.end_distance.unwrap_or(0.0);
-                            self.set_zone(
-                                &cv.id,
-                                start_angle,
-                                end_angle,
-                                start_distance,
-                                end_distance,
-                                cv.enabled,
-                            )
-                            .map(|_| ())
-                            .map_err(|e| RadarError::ControlError(e))
-                        } else if let Some(value) = cv.value {
+                        if let Some(value) = cv.value {
                             self.set_value(&cv.id, value)
                                 .map(|_| ())
                                 .map_err(|e| RadarError::ControlError(e))
@@ -1418,6 +1415,7 @@ impl SharedControls {
             control.enabled = Some(zone.enabled);
         }
     }
+
 
     pub(crate) fn set_valid_ranges(&self, ranges: &Ranges) {
         self.controls.write().unwrap().all_ranges = ranges.clone();

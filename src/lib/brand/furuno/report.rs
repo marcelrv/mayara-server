@@ -68,6 +68,7 @@ impl FurunoReportReceiver {
         };
 
         let control_update_rx = info.control_update_subscribe();
+        let blob_tx = radars.get_blob_tx();
 
         // let pixel_to_blob = Self::pixel_to_blob(&info.legend);
 
@@ -75,9 +76,10 @@ impl FurunoReportReceiver {
             args,
             key,
             info.clone(),
-            radars,
+            radars.clone(),
             control_update_rx,
             args.replay,
+            blob_tx,
         );
 
         FurunoReportReceiver {

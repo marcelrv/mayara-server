@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(./target/release/mayara-server:*)"
+      "Bash(./target/release/mayara-server:*)",
+      "Bash(*:cargo run:*)"
     ]
   }
 }

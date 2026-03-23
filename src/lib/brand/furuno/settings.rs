@@ -95,10 +95,6 @@ pub fn update_when_model_known(info: &mut RadarInfo, model: RadarModel, version:
     ) {
         info.dual_range = true;
 
-        // Merge targets from both ranges into a single shared list
-        info.controls
-            .add(new_list(ControlId::MergeTargets, &["Off", "On"]));
-
         // Noise Reduction (Signal Processing feature 3)
         info.controls
             .add(new_list(ControlId::NoiseRejection, &["Off", "On"]));

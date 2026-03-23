@@ -22,7 +22,7 @@ emulator = []
 # Serve GUI files from filesystem instead of embedded (for development)
 dev = []
 # default = ["navico", "furuno", "raymarine"]
-default = ["navico", "furuno", "raymarine"]
+default = ["navico", "furuno", "raymarine", "emulator"]
 
 [dependencies]
 ctor = "0.1"

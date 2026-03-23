@@ -7,10 +7,12 @@ use tokio_graceful_shutdown::SubsystemHandle;
 use super::command::Command;
 use super::world::EmulatorWorld;
 use super::{EMULATOR_SPOKE_LEN, EMULATOR_SPOKES, get_initial_position};
+use crate::Cli;
 use crate::radar::settings::{ControlId, ControlUpdate};
 use crate::radar::spoke::GenericSpoke;
-use crate::radar::{CommonRadar, GeoPosition, NAUTICAL_MILE, Power, RadarError, RadarInfo, SharedRadars};
-use crate::Cli;
+use crate::radar::{
+    CommonRadar, GeoPosition, NAUTICAL_MILE, Power, RadarError, RadarInfo, SharedRadars,
+};
 
 // Rotation speed: ~24 RPM = 2.5 seconds per rotation
 const ROTATION_TIME_MS: u64 = 2500;
@@ -27,8 +29,8 @@ pub struct EmulatorReportReceiver {
     // Emulator state
     world: EmulatorWorld,
     boat_position: GeoPosition,
-    boat_heading: f64, // degrees
-    boat_speed: f64,   // knots
+    boat_heading: f64,  // degrees
+    boat_speed: f64,    // knots
     current_range: u32, // meters
     transmitting: bool,
 
@@ -49,8 +51,12 @@ impl EmulatorReportReceiver {
         // Create command sender
         let command_sender = Some(Command::new(info.clone()));
 
+        // Guard zone is set in create_emulator_radar() before this point,
+        // either from persistence or as a default for ARPA testing
+
         let control_update_rx = info.control_update_subscribe();
-        let common = CommonRadar::new(args, key, info, radars, control_update_rx, false);
+        let blob_tx = radars.get_blob_tx();
+        let common = CommonRadar::new(args, key, info, radars, control_update_rx, false, blob_tx);
 
         // Create the world simulation
         let world = EmulatorWorld::new(initial_pos);
@@ -72,16 +78,19 @@ impl EmulatorReportReceiver {
 
     pub async fn run(mut self, subsys: SubsystemHandle) -> Result<(), RadarError> {
         // Set initial status to Transmit in emulator mode
-        self.common.set_value(&ControlId::Power, Power::Transmit as i32 as f64);
+        self.common
+            .set_value(&ControlId::Power, Power::Transmit as i32 as f64);
         self.transmitting = true;
 
         // Set initial range value in controls
-        self.common.set_value(&ControlId::Range, self.current_range as f64);
+        self.common
+            .set_value(&ControlId::Range, self.current_range as f64);
 
         // Calculate interval for spoke batches
         // 2048 spokes / 32 per batch = 64 batches per rotation
         // 2500ms / 64 = ~39ms per batch
-        let batch_interval_ms = ROTATION_TIME_MS / (EMULATOR_SPOKES as u64 / SPOKES_PER_BATCH as u64);
+        let batch_interval_ms =
+            ROTATION_TIME_MS / (EMULATOR_SPOKES as u64 / SPOKES_PER_BATCH as u64);
         let mut spoke_interval = interval(Duration::from_millis(batch_interval_ms));
 
         // Update navdata with initial position
@@ -127,19 +136,22 @@ impl EmulatorReportReceiver {
                                 // Transmit
                                 log::info!("{}: Starting transmission", self.common.key);
                                 self.transmitting = true;
-                                self.common.set_value(&ControlId::Power, Power::Transmit as i32 as f64);
+                                self.common
+                                    .set_value(&ControlId::Power, Power::Transmit as i32 as f64);
                             }
                             1 => {
                                 // Standby
                                 log::info!("{}: Stopping transmission (standby)", self.common.key);
                                 self.transmitting = false;
-                                self.common.set_value(&ControlId::Power, Power::Standby as i32 as f64);
+                                self.common
+                                    .set_value(&ControlId::Power, Power::Standby as i32 as f64);
                             }
                             0 => {
                                 // Off
                                 log::info!("{}: Power off", self.common.key);
                                 self.transmitting = false;
-                                self.common.set_value(&ControlId::Power, Power::Off as i32 as f64);
+                                self.common
+                                    .set_value(&ControlId::Power, Power::Off as i32 as f64);
                             }
                             _ => {}
                         }
@@ -158,7 +170,10 @@ impl EmulatorReportReceiver {
             }
             _ => {
                 // Forward other control updates to command sender
-                let _ = self.common.process_control_update(control_update, &mut self.command_sender).await;
+                let _ = self
+                    .common
+                    .process_control_update(control_update, &mut self.command_sender)
+                    .await;
             }
         }
     }
@@ -178,7 +193,9 @@ impl EmulatorReportReceiver {
 
         // Update position
         let heading_rad = self.boat_heading * DEG_TO_RAD;
-        self.boat_position = self.boat_position.position_from_bearing(heading_rad, distance);
+        self.boat_position = self
+            .boat_position
+            .position_from_bearing(heading_rad, distance);
 
         // Update world (moving targets)
         self.world.update(elapsed_secs);
@@ -186,7 +203,10 @@ impl EmulatorReportReceiver {
 
     fn update_navdata(&self) {
         // Update the global navigation data
-        crate::navdata::set_position(Some(self.boat_position.lat()), Some(self.boat_position.lon()));
+        crate::navdata::set_position(
+            Some(self.boat_position.lat()),
+            Some(self.boat_position.lon()),
+        );
         crate::navdata::set_heading_true(Some(self.boat_heading * DEG_TO_RAD), "emulator");
         crate::navdata::set_sog(Some(self.boat_speed * KNOTS_TO_MS));
         crate::navdata::set_cog(Some(self.boat_heading * DEG_TO_RAD));
@@ -227,36 +247,24 @@ impl EmulatorReportReceiver {
     fn generate_spoke(&self, spoke_angle: u16) -> GenericSpoke {
         // Convert spoke angle to world bearing
         // Spoke 0 = boat heading, increases clockwise
-        let spoke_bearing_deg = (spoke_angle as f64 / EMULATOR_SPOKES as f64) * 360.0;
-        let world_bearing_rad = (self.boat_heading + spoke_bearing_deg) * DEG_TO_RAD;
+        let spoke_angle_deg = (spoke_angle as f64 / EMULATOR_SPOKES as f64) * 360.0;
+        let world_bearing_rad = (self.boat_heading + spoke_angle_deg) * DEG_TO_RAD;
 
         // Spokes are 1.5x the range setting
         let spoke_range = self.current_range as f64 * 1.5;
         let meters_per_pixel = spoke_range / EMULATOR_SPOKE_LEN as f64;
 
-        // Generate spoke data (1024 pixels, 4 bits each = 512 bytes packed)
-        let mut data: Vec<u8> = vec![0; EMULATOR_SPOKE_LEN / 2];
+        // Generate spoke data directly as bytes (one byte per pixel, 4-bit intensity)
+        let mut data: Vec<u8> = Vec::with_capacity(EMULATOR_SPOKE_LEN);
 
         for pixel in 0..EMULATOR_SPOKE_LEN {
             let distance = pixel as f64 * meters_per_pixel;
-            let intensity = self.world.get_intensity(&self.boat_position, world_bearing_rad, distance);
-
-            // Pack into nibbles (4 bits per pixel)
-            let byte_idx = pixel / 2;
-            if pixel % 2 == 0 {
-                data[byte_idx] |= intensity & 0x0f;
-            } else {
-                data[byte_idx] |= (intensity & 0x0f) << 4;
-            }
+            let intensity =
+                self.world
+                    .get_intensity(&self.boat_position, world_bearing_rad, distance);
+            data.push(intensity & 0x0f);
         }
 
-        // Unpack to full bytes (like Navico report.rs does)
-        let mut generic_spoke: Vec<u8> = Vec::with_capacity(EMULATOR_SPOKE_LEN);
-        for byte in &data {
-            generic_spoke.push(byte & 0x0f);        // Low nibble
-            generic_spoke.push((byte >> 4) & 0x0f); // High nibble
-        }
-
-        generic_spoke
+        data
     }
 }

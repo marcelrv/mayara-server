@@ -99,10 +99,11 @@ impl RaymarineReportReceiver {
         let command_sender = None; // Only known after we receive the model info
 
         let control_update_rx = info.control_update_subscribe();
+        let blob_tx = radars.get_blob_tx();
 
         let pixel_to_blob = pixel_to_blob(&info.get_legend());
 
-        let common = CommonRadar::new(args, key, info, radars, control_update_rx, replay);
+        let common = CommonRadar::new(args, key, info, radars.clone(), control_update_rx, replay, blob_tx);
 
         let now = Instant::now();
         RaymarineReportReceiver {

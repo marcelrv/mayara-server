@@ -1,8 +1,11 @@
+use std::f64::consts::PI;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
 
+use crate::config::GuardZone;
 use crate::locator::LocatorAddress;
+use crate::radar::settings::ControlId;
 use crate::radar::{GeoPosition, RadarInfo, SharedRadars};
 use crate::{Brand, Cli};
 
@@ -57,6 +60,8 @@ pub(super) fn new(_args: &Cli, _addresses: &mut Vec<LocatorAddress>) {
 
 /// Create the emulator radar directly (called from locator when --emulator is set)
 pub fn create_emulator_radar(args: &Cli, radars: &SharedRadars, subsys: &SubsystemHandle) {
+    log::info!("create_emulator_radar called");
+
     // Check if we already have an emulator radar
     if radars.is_radar_active_on_nic(&Brand::Emulator, &Ipv4Addr::LOCALHOST) {
         log::debug!("Emulator radar already exists");
@@ -91,6 +96,21 @@ pub fn create_emulator_radar(args: &Cli, radars: &SharedRadars, subsys: &Subsyst
             &EMULATOR_RANGES.iter().map(|&r| r).collect::<Vec<_>>(),
         );
         info.set_ranges(ranges);
+
+        // Set a default guard zone for testing if none was loaded from persistence
+        // Covers the rear starboard quadrant: -135° to -45° relative to heading (225° to 315°)
+        if info.controls.guard_zone(&ControlId::GuardZone1).is_none() {
+            let guard_zone = GuardZone {
+                start_angle: 225.0 * PI / 180.0,
+                end_angle: 315.0 * PI / 180.0,
+                start_distance: 300.0,
+                end_distance: 700.0,
+                enabled: true,
+            };
+            info.controls.set_guard_zone(&ControlId::GuardZone1, &guard_zone);
+            log::info!("Emulator: Set default guard zone 1 for ARPA testing");
+        }
+
         radars.update(&mut info);
 
         // Start the report receiver (spoke generator)

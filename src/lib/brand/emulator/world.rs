@@ -2,11 +2,16 @@ use std::f64::consts::PI;
 
 use crate::radar::GeoPosition;
 
-// Constants for target simulation
+// Constants for east-moving targets simulation
 const TARGET_SPEED_KNOTS: f64 = 5.0;
 const TARGET_DISTANCE_SOUTH: f64 = 500.0; // meters
 const TARGET_SPACING: f64 = 500.0; // meters between targets
 const NUM_TARGETS: usize = 5;
+
+// Crossing targets: boats coming from north, heading south at 10 knots
+const CROSSING_SPEED_KNOTS: f64 = 10.0;
+const CROSSING_SPACING: f64 = 500.0; // meters between crossing boats
+const NUM_CROSSING_TARGETS: usize = 3;
 
 // Land area dimensions
 const LAND_DISTANCE_NE: f64 = 2000.0; // 2 km NE of initial position
@@ -42,6 +47,21 @@ impl Target {
         let distance = self.speed * elapsed_secs;
         let heading_rad = self.heading * DEG_TO_RAD;
         self.position = self.position.position_from_bearing(heading_rad, distance);
+    }
+}
+
+/// A static buoy (small radar target)
+#[derive(Clone, Debug)]
+pub struct Buoy {
+    /// Position of the buoy
+    pub position: GeoPosition,
+    /// Radar return radius in meters (typically small, ~5m)
+    pub radius: f64,
+}
+
+impl Buoy {
+    fn new(position: GeoPosition, radius: f64) -> Self {
+        Buoy { position, radius }
     }
 }
 
@@ -89,8 +109,12 @@ impl LandArea {
 pub struct EmulatorWorld {
     /// Land area (fixed position)
     pub land: LandArea,
-    /// Moving targets
+    /// Moving targets (east-moving boats)
     pub targets: Vec<Target>,
+    /// Crossing targets (north-to-south boats)
+    pub crossing_targets: Vec<Target>,
+    /// Static buoys
+    pub buoys: Vec<Buoy>,
 }
 
 impl EmulatorWorld {
@@ -118,12 +142,58 @@ impl EmulatorWorld {
             targets.push(Target::new(target_pos, 90.0, TARGET_SPEED_KNOTS));
         }
 
-        EmulatorWorld { land, targets }
+        // Create crossing targets: boats coming from North, heading South at 10 knots
+        // The first one passes 30m behind (west of) the front east-moving boat
+        // Front east-moving boat is at base_pos (500m south of initial_boat_pos)
+        let mut crossing_targets = Vec::with_capacity(NUM_CROSSING_TARGETS);
+
+        // Calculate crossing point: where the first crossing boat will pass
+        // It should pass 30m behind (west of) the front east-moving boat
+        // Place crossing boats 600m north of the east-moving boats' track
+        let crossing_start_distance_north = 600.0; // meters north of east-boat track
+        let behind_distance = 30.0; // meters behind (west of) front boat
+
+        // Position where crossing will happen: 30m west of front east-boat, at same latitude
+        let crossing_point = base_pos.position_from_bearing(west_bearing, behind_distance);
+
+        // Starting position for first crossing boat: 400m north of crossing point
+        let north_bearing = 0.0 * DEG_TO_RAD; // North
+        let first_crossing_start =
+            crossing_point.position_from_bearing(north_bearing, crossing_start_distance_north);
+
+        for i in 0..NUM_CROSSING_TARGETS {
+            // Offset east by i * CROSSING_SPACING so they form a line
+            let offset = i as f64 * CROSSING_SPACING;
+            let east_bearing = 90.0 * DEG_TO_RAD;
+            let crossing_pos = first_crossing_start.position_from_bearing(east_bearing, offset);
+            // Moving South at 10 knots
+            crossing_targets.push(Target::new(crossing_pos, 180.0, CROSSING_SPEED_KNOTS));
+        }
+
+        // Create a static buoy near the east-moving boats' path
+        // Place it 10m south of their track, 200m east of the front boat
+        // This is at least 150m away from where the crossing happens (30m west)
+        let buoy_east_offset = 200.0; // meters east of front boat
+        let buoy_south_offset = 10.0; // meters south of track
+        let east_bearing = 90.0 * DEG_TO_RAD;
+        let buoy_base = base_pos.position_from_bearing(east_bearing, buoy_east_offset);
+        let buoy_pos = buoy_base.position_from_bearing(south_bearing, buoy_south_offset);
+        let buoys = vec![Buoy::new(buoy_pos, 5.0)]; // 5m radius buoy
+
+        EmulatorWorld {
+            land,
+            targets,
+            crossing_targets,
+            buoys,
+        }
     }
 
     /// Update all moving objects based on elapsed time
     pub fn update(&mut self, elapsed_secs: f64) {
         for target in &mut self.targets {
+            target.update(elapsed_secs);
+        }
+        for target in &mut self.crossing_targets {
             target.update(elapsed_secs);
         }
     }
@@ -147,6 +217,24 @@ impl EmulatorWorld {
                 // Intensity decreases with distance from target center
                 let intensity = 15.0 - (target_distance / TARGET_RADIUS) * 5.0;
                 return intensity.max(13.0) as u8;
+            }
+        }
+
+        // Check crossing targets
+        for target in &self.crossing_targets {
+            let target_distance = distance_between(&point, &target.position);
+            if target_distance < TARGET_RADIUS {
+                let intensity = 15.0 - (target_distance / TARGET_RADIUS) * 5.0;
+                return intensity.max(13.0) as u8;
+            }
+        }
+
+        // Check buoys (smaller radar return)
+        for buoy in &self.buoys {
+            let buoy_distance = distance_between(&point, &buoy.position);
+            if buoy_distance < buoy.radius {
+                // Buoys give a moderate return
+                return 10;
             }
         }
 

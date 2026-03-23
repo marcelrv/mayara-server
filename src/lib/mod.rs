@@ -3,6 +3,7 @@ extern crate tokio;
 use clap::Parser;
 use locator::Locator;
 use miette::Result;
+use radar::target::{BlobMessage, TrackerManager};
 use radar::SharedRadars;
 use serde::{Serialize, Serializer};
 use std::{
@@ -112,6 +113,10 @@ pub struct Cli {
     /// Use emulator radar instead of real radar discovery
     #[arg(long, default_value_t = false)]
     pub emulator: bool,
+
+    /// Merge targets from multiple radars into a single shared target list
+    #[arg(long, default_value_t = false)]
+    pub merge_targets: bool,
 }
 
 /// Static position data (latitude, longitude, heading)
@@ -313,6 +318,26 @@ pub async fn start_session(
 ) {
     let radars = SharedRadars::new();
     let (tx_interface_request, _) = broadcast::channel(10);
+
+    // Initialize target tracker manager if ARPA mode is enabled
+    if args.targets == TargetMode::Arpa {
+        let (blob_tx, blob_rx) = mpsc::channel::<BlobMessage>(512);
+        radars.set_blob_tx(blob_tx);
+
+        let sk_client_tx = radars.get_sk_client_tx();
+        let (tracker_manager, marpa_tx) = TrackerManager::new(args.merge_targets, sk_client_tx);
+        radars.set_marpa_tx(marpa_tx);
+
+        subsystem.start(SubsystemBuilder::new("TrackerManager", |subsys| async move {
+            tokio::select! { biased;
+                _ = subsys.on_shutdown_requested() => {
+                    log::debug!("TrackerManager shutdown requested");
+                },
+                _ = tracker_manager.run(blob_rx) => {}
+            }
+            Ok::<(), miette::Report>(())
+        }));
+    }
 
     // Initialize navigation broadcast sender so navdata can push updates to GUI clients
     navdata::init_nav_broadcast(radars.get_sk_client_tx());

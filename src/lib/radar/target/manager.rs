@@ -1,530 +1,513 @@
-//! Shared target manager for dual radar support
+//! Target tracker manager.
 //!
-//! Manages ARPA targets across multiple radars, allowing targets to seamlessly
-//! transition between radars based on optimal coverage (smallest range that
-//! can see the target provides best resolution).
+//! Manages target trackers based on merge mode (single shared tracker vs per-radar trackers).
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::collections::HashMap;
+use std::f64::consts::PI;
 
+use tokio::sync::{broadcast, mpsc};
+
+use super::blob::CompletedBlob;
+use super::tracker::{CandidateSource, ProcessResult, TargetCandidate, TargetTracker};
+use super::{ArpaTargetApi, TargetDangerApi, TargetMotionApi, TargetPositionApi};
 use crate::radar::GeoPosition;
+use crate::stream::SignalKDelta;
 
-use super::kalman::Polar;
-use super::spoke_coords::SpokeBearing;
-use super::{
-    ArpaTarget, ArpaTargetApi, Doppler, ExtendedPosition, RefreshState, TargetStatus,
-    METERS_PER_DEGREE_LATITUDE,
-};
+/// Knots to m/s conversion
+const KN_TO_MS: f64 = 1852.0 / 3600.0;
 
-/// Configuration for a radar participating in shared target management
-#[derive(Debug, Clone)]
-pub(crate) struct RadarTargetConfig {
-    /// Unique key identifying this radar
-    pub(crate) key: String,
-    /// Current range in meters
-    pub(crate) range_meters: u32,
-    /// Pixels per meter at current range
-    pub(crate) pixels_per_meter: f64,
-    /// Number of spokes per revolution
-    pub(crate) spokes_per_revolution: i32,
-    /// Current radar position
-    pub(crate) position: GeoPosition,
-    /// Whether this radar is currently transmitting
-    pub(crate) transmitting: bool,
+/// Context from the spoke that produced a blob
+#[derive(Clone, Debug)]
+pub struct SpokeContext {
+    /// Timestamp (millis since epoch)
+    pub time: u64,
+    /// Range in meters
+    pub range: u32,
+    /// True bearing in spokes (None if no heading available)
+    pub bearing: Option<u16>,
+    /// Radar latitude
+    pub lat: Option<f64>,
+    /// Radar longitude
+    pub lon: Option<f64>,
+    /// Spokes per revolution
+    pub spokes_per_revolution: u16,
+    /// Spoke data length (pixels)
+    pub spoke_len: usize,
+    /// Head-relative angle in spokes
+    pub angle: u16,
+    /// Maximum target speed in m/s (from ArpaDetectMode: 0=25kn, 1=40kn, 2=50kn)
+    pub max_target_speed_ms: f64,
 }
 
-/// A target managed by the shared target manager
-#[derive(Debug, Clone)]
-pub(crate) struct ManagedTarget {
-    /// The underlying ARPA target
-    pub(crate) target: ArpaTarget,
-    /// Key of the radar currently tracking this target
-    pub(crate) tracking_radar: String,
-    /// Key of the radar that originally acquired this target
-    pub(crate) source_radar: String,
-    /// Whether this target was recently transferred from another radar
-    pub(crate) transferred: bool,
-    /// Last refresh timestamp
-    pub(crate) last_refresh: u64,
-}
-
-/// Internal state of the target manager
-struct TargetManagerState {
-    /// All tracked targets, keyed by global target ID
-    targets: HashMap<usize, ManagedTarget>,
-    /// Next available target ID
-    next_target_id: usize,
-    /// Radar configurations for range selection
-    radar_configs: HashMap<String, RadarTargetConfig>,
-}
-
-/// Shared target manager for coordinating targets across multiple radars
-///
-/// This manager maintains a single pool of targets that can be tracked by
-/// any of the registered radars. Targets automatically transition to the
-/// radar with the best coverage (smallest range that can see the target).
-#[derive(Clone)]
-pub struct SharedTargetManager {
-    inner: Arc<RwLock<TargetManagerState>>,
-}
-
-impl std::fmt::Debug for SharedTargetManager {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state = self.inner.read().unwrap();
-        f.debug_struct("SharedTargetManager")
-            .field("target_count", &state.targets.len())
-            .field("radar_count", &state.radar_configs.len())
-            .finish()
+impl SpokeContext {
+    /// Get max target speed based on ArpaDetectMode setting
+    pub fn max_speed_from_mode(mode: i32) -> f64 {
+        match mode {
+            0 => 25.0 * KN_TO_MS, // Normal
+            1 => 40.0 * KN_TO_MS, // Medium
+            _ => 50.0 * KN_TO_MS, // Fast
+        }
     }
 }
 
-impl SharedTargetManager {
-    /// Create a new shared target manager
-    pub(crate) fn new() -> Self {
-        SharedTargetManager {
-            inner: Arc::new(RwLock::new(TargetManagerState {
-                targets: HashMap::new(),
-                next_target_id: 1,
-                radar_configs: HashMap::new(),
-            })),
+/// Message sent from radar to tracker
+pub struct BlobMessage {
+    pub radar_key: String,
+    pub blob: CompletedBlob,
+    pub context: SpokeContext,
+}
+
+/// MARPA (Manual Radar Plotting Aid) request from user click
+#[derive(Clone, Debug)]
+pub struct MarpaRequest {
+    /// Radar key
+    pub radar_key: String,
+    /// Target position
+    pub position: GeoPosition,
+    /// Radar position (for computing bearing/distance in API)
+    pub radar_position: Option<GeoPosition>,
+    /// Timestamp (millis since epoch)
+    pub time: u64,
+    /// Estimated size in meters (default ~30m for ship)
+    pub size_meters: f64,
+}
+
+/// Manages target trackers for all radars
+pub struct TrackerManager {
+    /// Per-radar trackers (when merge_mode = false)
+    per_radar_trackers: HashMap<String, TargetTracker>,
+    /// Shared tracker (when merge_mode = true)
+    shared_tracker: Option<TargetTracker>,
+    /// Whether targets are merged across radars
+    merge_mode: bool,
+    /// Radar indices for per-radar ID generation
+    radar_indices: HashMap<String, usize>,
+    /// Next radar index
+    next_radar_index: usize,
+    /// Broadcast sender for GUI updates
+    sk_client_tx: broadcast::Sender<SignalKDelta>,
+    /// MARPA request receiver
+    marpa_rx: mpsc::Receiver<MarpaRequest>,
+}
+
+impl TrackerManager {
+    /// Create a new tracker manager, returns (manager, marpa_tx)
+    pub fn new(
+        merge_mode: bool,
+        sk_client_tx: broadcast::Sender<SignalKDelta>,
+    ) -> (Self, mpsc::Sender<MarpaRequest>) {
+        let (marpa_tx, marpa_rx) = mpsc::channel(32);
+
+        let manager = TrackerManager {
+            per_radar_trackers: HashMap::new(),
+            shared_tracker: if merge_mode {
+                Some(TargetTracker::new_merged(2048))
+            } else {
+                None
+            },
+            merge_mode,
+            radar_indices: HashMap::new(),
+            next_radar_index: 1,
+            sk_client_tx,
+            marpa_rx,
+        };
+
+        (manager, marpa_tx)
+    }
+
+    /// Get or create tracker for a radar
+    fn get_or_create_tracker(&mut self, radar_key: &str, spokes_per_revolution: u16) -> &mut TargetTracker {
+        if self.merge_mode {
+            // Update spokes if needed
+            if let Some(ref mut tracker) = self.shared_tracker {
+                return tracker;
+            }
+            // Should not happen, but create if missing
+            self.shared_tracker = Some(TargetTracker::new_merged(spokes_per_revolution));
+            self.shared_tracker.as_mut().unwrap()
+        } else {
+            // Per-radar mode
+            if !self.per_radar_trackers.contains_key(radar_key) {
+                let index = self.get_radar_index(radar_key);
+                let tracker = TargetTracker::new_per_radar(index, spokes_per_revolution);
+                self.per_radar_trackers.insert(radar_key.to_string(), tracker);
+            }
+            self.per_radar_trackers.get_mut(radar_key).unwrap()
         }
     }
 
-    /// Register a radar for target management
-    pub(crate) fn register_radar(&self, config: RadarTargetConfig) {
-        let mut state = self.inner.write().unwrap();
+    /// Get radar index (for per-radar ID generation)
+    fn get_radar_index(&mut self, radar_key: &str) -> usize {
+        if let Some(&index) = self.radar_indices.get(radar_key) {
+            index
+        } else {
+            let index = self.next_radar_index;
+            self.next_radar_index += 1;
+            self.radar_indices.insert(radar_key.to_string(), index);
+            log::info!("Assigned radar {} index {}", radar_key, index);
+            index
+        }
+    }
+
+    /// Process a blob message
+    pub fn process_blob(&mut self, msg: BlobMessage) {
+        let ctx = &msg.context;
+
+        // Convert blob to geo position
+        let Some(position) = blob_to_position(&msg.blob, ctx) else {
+            log::trace!("Cannot convert blob to position (missing lat/lon/bearing)");
+            return;
+        };
+
+        // Radar position for API conversion
+        let radar_position = match (ctx.lat, ctx.lon) {
+            (Some(lat), Some(lon)) => Some(GeoPosition::new(lat, lon)),
+            _ => None,
+        };
+
+        // Determine candidate source based on guard zone presence
+        let source = if let Some(&zone_id) = msg.blob.in_guard_zones.first() {
+            CandidateSource::GuardZone(zone_id)
+        } else {
+            // TODO: Check for Doppler-colored pixels when implemented
+            CandidateSource::Anywhere
+        };
+
+        // Create target candidate
+        let candidate = TargetCandidate {
+            time: ctx.time,
+            position,
+            size_meters: msg.blob.size_meters,
+            radar_key: msg.radar_key.clone(),
+            max_target_speed_ms: ctx.max_target_speed_ms,
+            source,
+        };
+
         log::debug!(
-            "Registering radar '{}' with range {}m for target management",
-            config.key,
-            config.range_meters
+            "Processing blob: pos=({:.6}, {:.6}), angle={}, source={:?}, size={:.1}m",
+            position.lat(),
+            position.lon(),
+            ctx.angle,
+            source,
+            msg.blob.size_meters
         );
-        state.radar_configs.insert(config.key.clone(), config);
-    }
 
-    /// Update radar configuration (e.g., when range changes)
-    pub(crate) fn update_radar_config(&self, config: RadarTargetConfig) {
-        let mut state = self.inner.write().unwrap();
-        if state.radar_configs.contains_key(&config.key) {
-            state.radar_configs.insert(config.key.clone(), config);
-        }
-    }
+        // Get tracker and process
+        let tracker = self.get_or_create_tracker(&msg.radar_key, ctx.spokes_per_revolution);
 
-    /// Remove a radar from target management
-    pub(crate) fn unregister_radar(&self, key: &str) {
-        let mut state = self.inner.write().unwrap();
-        log::debug!("Unregistering radar '{}' from target management", key);
-        state.radar_configs.remove(key);
+        // Check for revolution boundary
+        tracker.check_revolution(ctx.angle, ctx.time);
 
-        // Mark targets tracked by this radar as needing reassignment
-        for managed in state.targets.values_mut() {
-            if managed.tracking_radar == key {
-                managed.transferred = true;
+        // Process the candidate and broadcast if needed
+        let result = tracker.process_candidate(candidate);
+
+        // Broadcast target updates to GUI
+        match result {
+            ProcessResult::Updated(ref target_id)
+            | ProcessResult::Promoted(ref target_id)
+            | ProcessResult::NewAcquiring(ref target_id) => {
+                if let Some(target) = tracker.get_target(target_id) {
+                    let target_api = active_target_to_api(target, radar_position.as_ref());
+
+                    // Parse numeric ID from string (e.g., "T000001" -> 1)
+                    let numeric_id: usize = target_id
+                        .chars()
+                        .filter(|c| c.is_ascii_digit())
+                        .collect::<String>()
+                        .parse()
+                        .unwrap_or(0);
+
+                    let mut delta = SignalKDelta::new();
+                    delta.add_target_update(&msg.radar_key, numeric_id, Some(target_api));
+
+                    if let Err(e) = self.sk_client_tx.send(delta) {
+                        log::trace!("Failed to broadcast target update: {}", e);
+                    }
+                }
+            }
+            ProcessResult::Ignored => {
+                // No broadcast needed - candidate didn't match and wasn't in guard zone
             }
         }
     }
 
-    /// Find the best radar for tracking a target at the given position
-    ///
-    /// Returns the radar with the smallest range that can still see the target,
-    /// as smaller range provides better resolution.
-    pub(crate) fn find_best_radar_for_target(&self, target_position: &GeoPosition) -> Option<String> {
-        let state = self.inner.read().unwrap();
-        self.find_best_radar_internal(&state, target_position)
-    }
+    /// Get all active targets as API objects
+    pub fn get_targets_api(&self, radar_position: Option<GeoPosition>) -> Vec<ArpaTargetApi> {
+        let mut targets = Vec::new();
 
-    fn find_best_radar_internal(
-        &self,
-        state: &TargetManagerState,
-        target_position: &GeoPosition,
-    ) -> Option<String> {
-        let mut best_radar: Option<(&str, u32)> = None;
-
-        for (key, config) in &state.radar_configs {
-            if !config.transmitting {
-                continue;
+        if self.merge_mode {
+            if let Some(ref tracker) = self.shared_tracker {
+                for target in tracker.get_active_targets() {
+                    targets.push(active_target_to_api(target, radar_position.as_ref()));
+                }
             }
-
-            let distance = Self::calculate_distance(&config.position, target_position);
-            // Allow some margin for target size (99% of range)
-            let effective_range = config.range_meters as f64 * 0.99;
-
-            if distance <= effective_range {
-                match best_radar {
-                    None => {
-                        best_radar = Some((key.as_str(), config.range_meters));
-                    }
-                    Some((_, best_range)) if config.range_meters < best_range => {
-                        best_radar = Some((key.as_str(), config.range_meters));
-                    }
-                    _ => {}
+        } else {
+            for tracker in self.per_radar_trackers.values() {
+                for target in tracker.get_active_targets() {
+                    targets.push(active_target_to_api(target, radar_position.as_ref()));
                 }
             }
         }
 
-        best_radar.map(|(key, _)| key.to_string())
+        targets
     }
 
-    /// Calculate distance between two positions in meters
-    fn calculate_distance(pos1: &GeoPosition, pos2: &GeoPosition) -> f64 {
-        const METERS_PER_NM: f64 = 1852.0;
-        const MINUTES_PER_DEGREE: f64 = 60.0;
-
-        let dlat = (pos2.lat - pos1.lat) * MINUTES_PER_DEGREE * METERS_PER_NM;
-        let dlon = (pos2.lon - pos1.lon)
-            * MINUTES_PER_DEGREE
-            * METERS_PER_NM
-            * pos1.lat.to_radians().cos();
-
-        (dlat * dlat + dlon * dlon).sqrt()
-    }
-
-    /// Acquire a new target on the specified radar
-    pub(crate) fn acquire_target(
-        &self,
-        radar_key: &str,
-        position: ExtendedPosition,
-        doppler: Doppler,
-        spokes_per_revolution: usize,
-        have_doppler: bool,
-    ) -> usize {
-        let mut state = self.inner.write().unwrap();
-
-        let target_id = state.next_target_id;
-        state.next_target_id += 1;
-        if state.next_target_id >= 100000 {
-            state.next_target_id = 1;
-        }
-
-        // Get radar config to calculate polar coordinates
-        let radar_config = state.radar_configs.get(radar_key).cloned();
-
-        // Get radar position from config or use default
-        let radar_pos = radar_config
-            .as_ref()
-            .map(|c| c.position.clone())
-            .unwrap_or_else(|| GeoPosition::new(0., 0.));
-
-        let mut target = ArpaTarget::new(
-            position.clone(),
-            radar_pos.clone(),
-            target_id,
-            spokes_per_revolution,
-            TargetStatus::Acquire0,
-            have_doppler,
+    /// Process a MARPA request (manual target acquisition from user click)
+    /// MARPA targets are immediately added as active (no acquisition phase needed)
+    pub fn process_marpa(&mut self, request: MarpaRequest) -> String {
+        log::info!(
+            "MARPA acquisition at ({:.6}, {:.6}) for radar {}",
+            request.position.lat(),
+            request.position.lon(),
+            request.radar_key
         );
 
-        // Calculate polar coordinates if we have radar config with valid pixels_per_meter
-        if let Some(config) = &radar_config {
-            if config.pixels_per_meter > 0.0 {
-                let polar = Self::pos2polar(
-                    &position,
-                    &radar_pos,
-                    config.pixels_per_meter,
-                    config.spokes_per_revolution as f64,
-                );
-                // Set contour position and expected so refresh can find the target
-                target.contour.position = polar.clone();
-                target.expected = polar.clone();
+        // Create a candidate with default max speed (fast mode - 50 knots)
+        // MARPA uses GuardZone(0) to indicate manual acquisition
+        let candidate = TargetCandidate {
+            time: request.time,
+            position: request.position,
+            size_meters: request.size_meters,
+            radar_key: request.radar_key.clone(),
+            max_target_speed_ms: SpokeContext::max_speed_from_mode(2), // Fast mode for MARPA
+            source: CandidateSource::GuardZone(0), // 0 = manual/MARPA
+        };
 
-                log::debug!(
-                    "Acquired target {} polar: bearing={}, r={}, pixels_per_meter={}",
-                    target_id,
-                    polar.bearing,
-                    polar.r,
-                    config.pixels_per_meter
-                );
+        // Get tracker (use default 2048 spokes if not yet created)
+        let tracker = self.get_or_create_tracker(&request.radar_key, 2048);
+
+        // MARPA targets go directly to active - user explicitly clicked on them
+        let target_id = tracker.add_active_target(&candidate);
+
+        // Broadcast the new target
+        if let Some(target) = tracker.get_target(&target_id) {
+            let target_api = active_target_to_api(target, request.radar_position.as_ref());
+
+            let numeric_id: usize = target_id
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0);
+
+            let mut delta = SignalKDelta::new();
+            delta.add_target_update(&request.radar_key, numeric_id, Some(target_api));
+
+            if let Err(e) = self.sk_client_tx.send(delta) {
+                log::trace!("Failed to broadcast MARPA target update: {}", e);
             }
         }
 
-        let managed = ManagedTarget {
-            target,
-            tracking_radar: radar_key.to_string(),
-            source_radar: radar_key.to_string(),
-            transferred: false,
-            last_refresh: position.time,
-        };
-
-        log::debug!(
-            "Acquired new target {} on radar '{}' at ({}, {})",
-            target_id,
-            radar_key,
-            position.pos.lat,
-            position.pos.lon
-        );
-
-        state.targets.insert(target_id, managed);
         target_id
     }
 
-    /// Convert lat/lon position to polar coordinates (angle in spokes, r in pixels)
-    fn pos2polar(
-        target: &ExtendedPosition,
-        radar_pos: &GeoPosition,
-        pixels_per_meter: f64,
-        spokes_per_revolution: f64,
-    ) -> Polar {
-        use std::f64::consts::PI;
+    /// Run the tracker manager, receiving blobs and MARPA requests
+    pub async fn run(mut self, mut blob_rx: mpsc::Receiver<BlobMessage>) {
+        use std::time::Duration;
 
-        let dif_lat = target.pos.lat - radar_pos.lat;
-        let dif_lon = (target.pos.lon - radar_pos.lon) * radar_pos.lat.to_radians().cos();
-        let r = ((dif_lat * dif_lat + dif_lon * dif_lon).sqrt()
-            * METERS_PER_DEGREE_LATITUDE
-            * pixels_per_meter
-            + 1.) as i32;
-        let mut angle = f64::atan2(dif_lon, dif_lat) * spokes_per_revolution / (2. * PI) + 1.;
-        if angle < 0. {
-            angle += spokes_per_revolution;
-        }
-        Polar::new(SpokeBearing::new(angle as i32, spokes_per_revolution as u32), r, target.time)
-    }
-
-    /// Add an already-constructed target to the shared manager
-    pub(crate) fn add_target(&self, target_id: usize, target: ArpaTarget, radar_key: &str) {
-        let mut state = self.inner.write().unwrap();
-
-        let managed = ManagedTarget {
-            target,
-            tracking_radar: radar_key.to_string(),
-            source_radar: radar_key.to_string(),
-            transferred: false,
-            last_refresh: 0,
-        };
-
-        log::debug!(
-            "Added target {} to shared manager for radar '{}'",
-            target_id,
-            radar_key
+        log::info!(
+            "TrackerManager started in {} mode",
+            if self.merge_mode { "merged" } else { "per-radar" }
         );
 
-        state.targets.insert(target_id, managed);
-    }
+        // Check timeouts every second
+        let mut timeout_interval = tokio::time::interval(Duration::from_secs(1));
 
-    /// Get all targets currently assigned to a specific radar
-    pub(crate) fn get_targets_for_radar(&self, radar_key: &str) -> Vec<(usize, ArpaTarget)> {
-        let state = self.inner.read().unwrap();
-        state
-            .targets
-            .iter()
-            .filter(|(_, managed)| managed.tracking_radar == radar_key)
-            .map(|(id, managed)| (*id, managed.target.clone()))
-            .collect()
-    }
-
-    /// Get a specific target by ID
-    pub(crate) fn get_target(&self, target_id: usize) -> Option<ManagedTarget> {
-        let state = self.inner.read().unwrap();
-        state.targets.get(&target_id).cloned()
-    }
-
-    /// Update a target after refresh
-    pub(crate) fn update_target(&self, target_id: usize, target: ArpaTarget, refresh_time: u64) {
-        let mut state = self.inner.write().unwrap();
-        if let Some(managed) = state.targets.get_mut(&target_id) {
-            managed.target = target;
-            managed.last_refresh = refresh_time;
-            managed.transferred = false;
-        }
-    }
-
-    /// Transfer a target to a different radar
-    pub(crate) fn transfer_target(&self, target_id: usize, new_radar: &str) -> bool {
-        let mut state = self.inner.write().unwrap();
-        if let Some(managed) = state.targets.get_mut(&target_id) {
-            if managed.tracking_radar != new_radar {
-                log::debug!(
-                    "Transferring target {} from '{}' to '{}'",
-                    target_id,
-                    managed.tracking_radar,
-                    new_radar
-                );
-                managed.tracking_radar = new_radar.to_string();
-                managed.transferred = true;
-                return true;
+        loop {
+            tokio::select! {
+                Some(msg) = blob_rx.recv() => {
+                    self.process_blob(msg);
+                }
+                Some(request) = self.marpa_rx.recv() => {
+                    self.process_marpa(request);
+                }
+                _ = timeout_interval.tick() => {
+                    self.check_all_timeouts();
+                }
+                else => break,
             }
         }
-        false
+
+        log::info!("TrackerManager shutting down");
     }
 
-    /// Evaluate all targets and transfer them to better radars if available
-    pub(crate) fn evaluate_radar_transfers(&self) {
-        let mut state = self.inner.write().unwrap();
+    /// Check timeouts on all trackers and broadcast deletions and lost status updates
+    fn check_all_timeouts(&mut self) {
+        use std::time::{SystemTime, UNIX_EPOCH};
 
-        let mut transfers: Vec<(usize, String)> = Vec::new();
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
 
-        for (target_id, managed) in &state.targets {
-            if managed.target.status == TargetStatus::Lost {
-                continue;
+        // Collect updates to broadcast (to avoid borrow issues)
+        let mut lost_updates: Vec<(String, ArpaTargetApi)> = Vec::new();
+        let mut deletions: Vec<(String, String)> = Vec::new(); // (target_id, radar_key)
+
+        if self.merge_mode {
+            if let Some(ref mut tracker) = self.shared_tracker {
+                let (deleted_ids, lost_ids) = tracker.check_timeouts(current_time);
+
+                // Collect lost status updates
+                for id in &lost_ids {
+                    if let Some(target) = tracker.get_target(id) {
+                        let api = active_target_to_api(target, None);
+                        lost_updates.push((id.clone(), api));
+                    }
+                }
+
+                // Collect deletions
+                for id in deleted_ids {
+                    deletions.push((id, String::new()));
+                }
             }
+        } else {
+            let radar_keys: Vec<String> = self.per_radar_trackers.keys().cloned().collect();
+            for radar_key in radar_keys {
+                if let Some(tracker) = self.per_radar_trackers.get_mut(&radar_key) {
+                    let (deleted_ids, lost_ids) = tracker.check_timeouts(current_time);
 
-            if let Some(best_radar) =
-                self.find_best_radar_internal(&state, &managed.target.position.pos)
-            {
-                if best_radar != managed.tracking_radar {
-                    transfers.push((*target_id, best_radar));
+                    // Collect lost status updates
+                    for id in &lost_ids {
+                        if let Some(target) = tracker.get_target(id) {
+                            let api = active_target_to_api(target, None);
+                            lost_updates.push((id.clone(), api));
+                        }
+                    }
+
+                    // Collect deletions
+                    for id in deleted_ids {
+                        deletions.push((id, radar_key.clone()));
+                    }
                 }
             }
         }
 
-        // Apply transfers
-        for (target_id, new_radar) in transfers {
-            if let Some(managed) = state.targets.get_mut(&target_id) {
-                log::debug!(
-                    "Auto-transferring target {} from '{}' to '{}'",
-                    target_id,
-                    managed.tracking_radar,
-                    new_radar
-                );
-                managed.tracking_radar = new_radar;
-                managed.transferred = true;
-            }
+        // Now broadcast outside the tracker borrow
+        for (target_id, api) in lost_updates {
+            self.broadcast_lost_update(&target_id, api);
+        }
+
+        for (target_id, radar_key) in deletions {
+            self.broadcast_deletion(&target_id, &radar_key);
         }
     }
 
-    /// Delete a target by ID
-    pub(crate) fn delete_target(&self, target_id: usize) -> bool {
-        let mut state = self.inner.write().unwrap();
-        state.targets.remove(&target_id).is_some()
-    }
+    /// Broadcast a lost status update to SignalK
+    fn broadcast_lost_update(&self, target_id: &str, target_api: ArpaTargetApi) {
+        let numeric_id: usize = target_id
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0);
 
-    /// Delete the target closest to the given position
-    pub(crate) fn delete_target_near(&self, position: &GeoPosition) -> Option<usize> {
-        let mut state = self.inner.write().unwrap();
+        let mut delta = SignalKDelta::new();
+        delta.add_target_update("", numeric_id, Some(target_api));
 
-        let mut closest: Option<(usize, f64)> = None;
-
-        for (id, managed) in &state.targets {
-            if managed.target.status == TargetStatus::Lost {
-                continue;
-            }
-
-            let distance = Self::calculate_distance(&managed.target.position.pos, position);
-            match closest {
-                None => closest = Some((*id, distance)),
-                Some((_, min_dist)) if distance < min_dist => closest = Some((*id, distance)),
-                _ => {}
-            }
-        }
-
-        if let Some((id, dist)) = closest {
-            if dist < 1000.0 {
-                // Within 1km
-                state.targets.remove(&id);
-                return Some(id);
-            }
-        }
-
-        None
-    }
-
-    /// Delete all targets
-    pub(crate) fn delete_all_targets(&self) {
-        let mut state = self.inner.write().unwrap();
-        state.targets.clear();
-    }
-
-    /// Get all target IDs
-    pub(crate) fn get_all_target_ids(&self) -> Vec<usize> {
-        let state = self.inner.read().unwrap();
-        state.targets.keys().copied().collect()
-    }
-
-    /// Get IDs of all lost targets
-    pub(crate) fn get_lost_target_ids(&self) -> Vec<usize> {
-        let state = self.inner.read().unwrap();
-        state
-            .targets
-            .iter()
-            .filter(|(_, managed)| managed.target.status == TargetStatus::Lost)
-            .map(|(id, _)| *id)
-            .collect()
-    }
-
-    /// Clean up lost targets and reset refresh state for the next cycle
-    pub(crate) fn cleanup_lost_targets(&self) {
-        let mut state = self.inner.write().unwrap();
-        state
-            .targets
-            .retain(|_, managed| managed.target.status != TargetStatus::Lost);
-        // Reset refresh state for all remaining targets so they can be refreshed next cycle
-        for managed in state.targets.values_mut() {
-            managed.target.refreshed = RefreshState::NotFound;
+        if let Err(e) = self.sk_client_tx.send(delta) {
+            log::trace!("Failed to broadcast lost status update: {}", e);
         }
     }
 
-    /// Get the number of active targets
-    pub(crate) fn target_count(&self) -> usize {
-        let state = self.inner.read().unwrap();
-        state.targets.len()
-    }
+    /// Broadcast a deletion (null target) to SignalK
+    fn broadcast_deletion(&self, target_id: &str, radar_key: &str) {
+        // Parse numeric ID from string (e.g., "T000001" -> 1)
+        let numeric_id: usize = target_id
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0);
 
-    /// Get the number of registered radars
-    pub(crate) fn radar_count(&self) -> usize {
-        let state = self.inner.read().unwrap();
-        state.radar_configs.len()
-    }
+        let mut delta = SignalKDelta::new();
+        delta.add_target_update(radar_key, numeric_id, None);
 
-    /// Check if dual radar mode is active (2+ transmitting radars)
-    pub(crate) fn is_dual_radar_active(&self) -> bool {
-        let state = self.inner.read().unwrap();
-        state
-            .radar_configs
-            .values()
-            .filter(|c| c.transmitting)
-            .count()
-            >= 2
-    }
-
-    /// Get radar keys sorted by range (short to long)
-    pub(crate) fn get_radars_by_range(&self) -> Vec<String> {
-        let state = self.inner.read().unwrap();
-        let mut radars: Vec<_> = state
-            .radar_configs
-            .values()
-            .filter(|c| c.transmitting)
-            .collect();
-        radars.sort_by_key(|c| c.range_meters);
-        radars.iter().map(|c| c.key.clone()).collect()
-    }
-
-    /// Get the short range radar key (smallest range)
-    pub(crate) fn get_short_range_radar(&self) -> Option<String> {
-        self.get_radars_by_range().first().cloned()
-    }
-
-    /// Get the long range radar key (largest range)
-    pub(crate) fn get_long_range_radar(&self) -> Option<String> {
-        self.get_radars_by_range().last().cloned()
-    }
-
-    /// Get all targets grouped by their tracking radar as API representations
-    /// Returns a map of radar_key -> Vec<(target_id, ArpaTargetApi)>
-    pub fn get_all_targets_by_radar(
-        &self,
-        radar_position: &GeoPosition,
-    ) -> std::collections::HashMap<String, Vec<(usize, ArpaTargetApi)>> {
-        let state = self.inner.read().unwrap();
-        let mut result: std::collections::HashMap<String, Vec<(usize, ArpaTargetApi)>> =
-            std::collections::HashMap::new();
-
-        for (id, managed) in &state.targets {
-            // Only include targets that should be broadcast (ACQUIRE3 or ACTIVE)
-            if managed.target.should_broadcast() {
-                result
-                    .entry(managed.tracking_radar.clone())
-                    .or_default()
-                    .push((*id, managed.target.to_api(radar_position)));
-            }
+        if let Err(e) = self.sk_client_tx.send(delta) {
+            log::trace!("Failed to broadcast target deletion: {}", e);
         }
 
-        result
+        log::info!("Broadcast deletion for target {}", target_id);
     }
+
 }
 
-impl Default for SharedTargetManager {
-    fn default() -> Self {
-        Self::new()
+/// Convert blob center to geographic position
+fn blob_to_position(blob: &CompletedBlob, ctx: &SpokeContext) -> Option<GeoPosition> {
+    let radar_lat = ctx.lat?;
+    let radar_lon = ctx.lon?;
+    let bearing_spokes = ctx.bearing?;
+
+    let radar_pos = GeoPosition::new(radar_lat, radar_lon);
+
+    // Convert bearing from spokes to radians
+    let bearing_rad = (bearing_spokes as f64 / ctx.spokes_per_revolution as f64) * 2.0 * PI;
+
+    // Calculate distance from pixel position
+    let distance_m = if ctx.spoke_len > 0 {
+        (blob.center_pixel as f64 / ctx.spoke_len as f64) * ctx.range as f64
+    } else {
+        0.0
+    };
+
+    Some(radar_pos.position_from_bearing(bearing_rad, distance_m))
+}
+
+/// Convert active target to API format
+fn active_target_to_api(
+    target: &super::tracker::ActiveTarget,
+    radar_position: Option<&GeoPosition>,
+) -> ArpaTargetApi {
+    let (bearing, distance) = if let Some(radar_pos) = radar_position {
+        let dlat =
+            (target.position.lat() - radar_pos.lat()) * super::METERS_PER_DEGREE_LATITUDE;
+        let dlon = (target.position.lon() - radar_pos.lon())
+            * super::meters_per_degree_longitude(&radar_pos.lat());
+
+        let dist = (dlat * dlat + dlon * dlon).sqrt();
+        let bearing = dlon.atan2(dlat);
+        let bearing = if bearing < 0.0 {
+            bearing + 2.0 * PI
+        } else {
+            bearing
+        };
+
+        (bearing, dist as i32)
+    } else {
+        (0.0, 0)
+    };
+
+    // Parse numeric ID from string (e.g., "T000001" -> 1)
+    let id: usize = target
+        .id
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0);
+
+    // Use the target's actual status
+    let status_str = target.status.as_str();
+
+    ArpaTargetApi {
+        id,
+        status: status_str.to_string(),
+        position: TargetPositionApi {
+            bearing,
+            distance,
+            latitude: Some(target.position.lat()),
+            longitude: Some(target.position.lon()),
+        },
+        motion: TargetMotionApi {
+            course: target.cog.unwrap_or(0.0),
+            speed: target.sog.unwrap_or(0.0),
+        },
+        danger: TargetDangerApi {
+            cpa: 0.0,  // TODO: Calculate CPA
+            tcpa: 0.0, // TODO: Calculate TCPA
+        },
+        acquisition: "auto".to_string(),
+        source_zone: None,
     }
 }
 
@@ -532,70 +515,205 @@ impl Default for SharedTargetManager {
 mod tests {
     use super::*;
 
-    fn create_test_config(key: &str, range: u32, lat: f64, lon: f64) -> RadarTargetConfig {
-        RadarTargetConfig {
-            key: key.to_string(),
-            range_meters: range,
-            pixels_per_meter: 1.0,
+    fn make_test_manager(merge_mode: bool) -> TrackerManager {
+        let (sk_tx, _rx) = broadcast::channel(16);
+        let (manager, _marpa_tx) = TrackerManager::new(merge_mode, sk_tx);
+        manager
+    }
+
+    fn make_blob(center_spoke: u16, center_pixel: usize, size_meters: f64) -> CompletedBlob {
+        CompletedBlob {
+            contour: vec![(center_spoke, center_pixel)],
+            all_pixels: vec![(center_spoke, center_pixel)],
+            center_spoke,
+            center_pixel,
+            size_meters,
+            in_guard_zones: vec![1], // Default to guard zone 1 for tests
+        }
+    }
+
+    fn make_context(time: u64, bearing: u16) -> SpokeContext {
+        SpokeContext {
+            time,
+            range: 1000,
+            bearing: Some(bearing),
+            lat: Some(52.0),
+            lon: Some(4.0),
             spokes_per_revolution: 2048,
-            position: GeoPosition::new(lat, lon),
-            transmitting: true,
+            spoke_len: 512,
+            angle: bearing,
+            max_target_speed_ms: SpokeContext::max_speed_from_mode(0), // Normal mode
         }
     }
 
     #[test]
-    fn test_find_best_radar_prefers_smaller_range() {
-        let manager = SharedTargetManager::new();
-
-        // Register two radars at same position with different ranges
-        manager.register_radar(create_test_config("radar_a", 5000, 52.0, 4.0));
-        manager.register_radar(create_test_config("radar_b", 10000, 52.0, 4.0));
-
-        // Target within range of both
-        let target_pos = GeoPosition::new(52.01, 4.01);
-        let best = manager.find_best_radar_for_target(&target_pos);
-
-        assert_eq!(best, Some("radar_a".to_string()));
+    fn test_manager_per_radar_mode() {
+        let manager = make_test_manager(false);
+        assert!(!manager.merge_mode);
+        assert!(manager.shared_tracker.is_none());
     }
 
     #[test]
-    fn test_find_best_radar_falls_back_to_longer_range() {
-        let manager = SharedTargetManager::new();
-
-        // Register two radars at same position with different ranges
-        manager.register_radar(create_test_config("radar_a", 2000, 52.0, 4.0));
-        manager.register_radar(create_test_config("radar_b", 10000, 52.0, 4.0));
-
-        // Target outside short range but within long range
-        let target_pos = GeoPosition::new(52.05, 4.05); // ~7km away
-        let best = manager.find_best_radar_for_target(&target_pos);
-
-        assert_eq!(best, Some("radar_b".to_string()));
+    fn test_manager_merged_mode() {
+        let manager = make_test_manager(true);
+        assert!(manager.merge_mode);
+        assert!(manager.shared_tracker.is_some());
     }
 
     #[test]
-    fn test_find_best_radar_returns_none_if_out_of_range() {
-        let manager = SharedTargetManager::new();
+    fn test_radar_index_assignment() {
+        let mut manager = make_test_manager(false);
 
-        manager.register_radar(create_test_config("radar_a", 1000, 52.0, 4.0));
+        let idx1 = manager.get_radar_index("radar1");
+        let idx2 = manager.get_radar_index("radar2");
+        let idx1_again = manager.get_radar_index("radar1");
 
-        // Target far away
-        let target_pos = GeoPosition::new(53.0, 5.0); // ~100km away
-        let best = manager.find_best_radar_for_target(&target_pos);
-
-        assert_eq!(best, None);
+        assert_eq!(idx1, 1);
+        assert_eq!(idx2, 2);
+        assert_eq!(idx1_again, 1);
     }
 
     #[test]
-    fn test_dual_radar_active() {
-        let manager = SharedTargetManager::new();
+    fn test_blob_to_position_north() {
+        let blob = make_blob(1024, 256, 30.0);
+        let ctx = make_context(1000, 0); // North
 
-        assert!(!manager.is_dual_radar_active());
+        let pos = blob_to_position(&blob, &ctx).unwrap();
 
-        manager.register_radar(create_test_config("radar_a", 5000, 52.0, 4.0));
-        assert!(!manager.is_dual_radar_active());
+        // Distance: 256/512 * 1000 = 500m
+        // Bearing: 0 = North
+        // Should be ~500m north of 52.0, 4.0
+        assert!(pos.lat() > 52.0, "Position should be north: {}", pos.lat());
+        assert!((pos.lon() - 4.0).abs() < 0.0001, "Longitude should be unchanged");
+    }
 
-        manager.register_radar(create_test_config("radar_b", 10000, 52.0, 4.0));
-        assert!(manager.is_dual_radar_active());
+    #[test]
+    fn test_blob_to_position_east() {
+        let blob = make_blob(1024, 256, 30.0);
+        let ctx = make_context(1000, 512); // East (512/2048 = 0.25 revolution = 90 degrees)
+
+        let pos = blob_to_position(&blob, &ctx).unwrap();
+
+        // Should be ~500m east
+        assert!(pos.lon() > 4.0, "Position should be east: {}", pos.lon());
+        assert!(
+            (pos.lat() - 52.0).abs() < 0.001,
+            "Latitude should be nearly unchanged"
+        );
+    }
+
+    #[test]
+    fn test_blob_to_position_missing_bearing() {
+        let blob = make_blob(1024, 256, 30.0);
+        let mut ctx = make_context(1000, 0);
+        ctx.bearing = None;
+
+        let pos = blob_to_position(&blob, &ctx);
+        assert!(pos.is_none());
+    }
+
+    #[test]
+    fn test_blob_to_position_missing_lat() {
+        let blob = make_blob(1024, 256, 30.0);
+        let mut ctx = make_context(1000, 0);
+        ctx.lat = None;
+
+        let pos = blob_to_position(&blob, &ctx);
+        assert!(pos.is_none());
+    }
+
+    #[test]
+    fn test_process_blob_creates_tracker() {
+        let mut manager = make_test_manager(false);
+
+        let blob = make_blob(1024, 256, 30.0);
+        let ctx = make_context(1000, 512);
+        let msg = BlobMessage {
+            radar_key: "test_radar".to_string(),
+            blob,
+            context: ctx,
+        };
+
+        manager.process_blob(msg);
+
+        // Should have created a tracker for this radar
+        assert!(manager.per_radar_trackers.contains_key("test_radar"));
+    }
+
+    #[test]
+    fn test_process_blob_merged_mode() {
+        let mut manager = make_test_manager(true);
+
+        let blob = make_blob(1024, 256, 30.0);
+        let ctx = make_context(1000, 512);
+        let msg = BlobMessage {
+            radar_key: "test_radar".to_string(),
+            blob,
+            context: ctx,
+        };
+
+        manager.process_blob(msg);
+
+        // In merged mode, no per-radar trackers
+        assert!(manager.per_radar_trackers.is_empty());
+        assert!(manager.shared_tracker.is_some());
+    }
+
+    #[test]
+    fn test_active_target_to_api() {
+        use super::super::tracker::TargetCandidate;
+
+        let max_speed = SpokeContext::max_speed_from_mode(0);
+
+        // Create an active target directly
+        let candidate = TargetCandidate {
+            time: 1000,
+            position: GeoPosition::new(52.001, 4.001),
+            size_meters: 30.0,
+            radar_key: "test".to_string(),
+            max_target_speed_ms: max_speed,
+            source: CandidateSource::GuardZone(1),
+        };
+
+        let mut tracker = super::super::tracker::TargetTracker::new_merged(2048);
+
+        // Process twice to promote
+        tracker.process_candidate(candidate.clone());
+        let candidate2 = TargetCandidate {
+            time: 4000,
+            position: GeoPosition::new(52.0011, 4.001),
+            size_meters: 30.0,
+            radar_key: "test".to_string(),
+            max_target_speed_ms: max_speed,
+            source: CandidateSource::GuardZone(1),
+        };
+        tracker.process_candidate(candidate2);
+
+        // Get the target
+        let target = tracker.get_active_targets().next().unwrap();
+        let radar_pos = GeoPosition::new(52.0, 4.0);
+
+        let api = active_target_to_api(target, Some(&radar_pos));
+
+        assert_eq!(api.status, "tracking");
+        assert!(api.position.distance > 0);
+        assert!(api.position.latitude.is_some());
+        assert!(api.position.longitude.is_some());
+        assert_eq!(api.acquisition, "auto");
+    }
+
+    #[test]
+    fn test_get_targets_api_empty() {
+        let manager = make_test_manager(false);
+        let targets = manager.get_targets_api(None);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn test_get_targets_api_merged() {
+        let manager = make_test_manager(true);
+        let radar_pos = GeoPosition::new(52.0, 4.0);
+        let targets = manager.get_targets_api(Some(radar_pos));
+        assert!(targets.is_empty()); // No blobs processed yet
     }
 }
