@@ -86,7 +86,7 @@ class PPI {
     this.lastHeading = null;
     this.headingRotation = 0;
     this.headingMode = "headingUp";
-    this.trueHeading = 0;
+    this.trueHeading = null;
 
     // Spoke data
     this.data = null;
@@ -848,6 +848,8 @@ class PPI {
 
   #drawTarget(ctx, id, target, pixelsPerMeter) {
     if (!target.position) return;
+    // Don't draw targets until we have heading data
+    if (this.trueHeading === null) return;
 
     // Calculate screen position from bearing and distance
     // Target bearing is geographic (true bearing from radar to target) in radians
@@ -860,7 +862,7 @@ class PPI {
     // by subtracting heading. The formula: screenAngle = geographicBearing - heading + headingRotation
     // Simplifies to: screenAngle = geographicBearing - heading in HU mode
     //                screenAngle = geographicBearing in NU mode
-    const heading = this.trueHeading || 0;
+    const heading = this.trueHeading;
     const adjustedBearing = bearingRad - heading + this.headingRotation;
 
     // Convert polar to cartesian (bearing is clockwise from north)
@@ -872,26 +874,26 @@ class PPI {
     let fillColor;
     switch (target.status) {
       case "tracking":
-        color = "#00ff00"; // Green for active tracking
-        fillColor = "rgba(0, 255, 0, 0.3)";
+        color = "#ffffff"; // White for active tracking
+        fillColor = "rgba(255, 255, 255, 0.2)";
         break;
       case "acquiring":
         color = "#ffff00"; // Yellow for acquiring
-        fillColor = "rgba(255, 255, 0, 0.3)";
+        fillColor = "rgba(255, 255, 0, 0.2)";
         break;
       case "lost":
         color = "#ff0000"; // Red for lost
-        fillColor = "rgba(255, 0, 0, 0.3)";
+        fillColor = "rgba(255, 0, 0, 0.2)";
         break;
       default:
         color = "#ffffff"; // White for unknown
-        fillColor = "rgba(255, 255, 255, 0.3)";
+        fillColor = "rgba(255, 255, 255, 0.2)";
     }
 
     ctx.save();
 
-    // Draw target symbol (circle with crosshairs)
-    const targetRadius = 12;
+    // Draw target symbol (small circle)
+    const targetRadius = 6;
 
     // Filled circle
     ctx.beginPath();
@@ -996,6 +998,8 @@ class PPI {
 
   #drawAisVessel(ctx, mmsi, vessel, pixelsPerMeter) {
     if (!vessel.position) return;
+    // Don't draw vessels until we have heading data
+    if (this.trueHeading === null) return;
 
     // Calculate screen position from lat/lon
     // We need own-ship position to calculate relative position
@@ -1041,7 +1045,7 @@ class PPI {
     if (pixelDist > this.beam_length * 1.5) return;
 
     // Apply heading rotation for display mode
-    const heading = this.trueHeading || 0;
+    const heading = this.trueHeading;
     const adjustedBearing = bearingRad - heading + this.headingRotation;
 
     // Convert polar to cartesian (bearing is clockwise from north)
@@ -1453,10 +1457,11 @@ class PPI {
       const clickDistance = Math.sqrt(dx * dx + dy * dy);
 
       // Only treat as click if mouse didn't move much (not a drag)
-      if (clickDistance < 5) {
+      // Require heading data for MARPA acquisition
+      if (clickDistance < 5 && this.trueHeading !== null) {
         const radarCoords = this.#pixelToRadarCoords(coords.x, coords.y);
         // Keep bearing in radians, add true heading to get bearing true
-        let bearingRad = radarCoords.angle + (this.trueHeading || 0);
+        let bearingRad = radarCoords.angle + this.trueHeading;
         // Normalize to [0, 2π)
         while (bearingRad < 0) bearingRad += 2 * Math.PI;
         while (bearingRad >= 2 * Math.PI) bearingRad -= 2 * Math.PI;
