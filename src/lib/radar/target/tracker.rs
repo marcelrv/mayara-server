@@ -120,7 +120,9 @@ pub struct ActiveTarget {
     pub cog: Option<f64>,
     /// Motion model for estimation (Kalman or IMM)
     motion_model: Box<dyn MotionModel>,
-    /// Last update timestamp
+    /// Timestamp when target was first seen (millis since epoch)
+    pub first_seen: u64,
+    /// Last update timestamp (millis since epoch)
     pub last_update: u64,
     /// Revolution count when target was last updated
     last_update_revolution: u64,
@@ -166,6 +168,7 @@ impl ActiveTarget {
             sog: None, // No speed until first update
             cog: None, // No course until first update
             motion_model,
+            first_seen: candidate.time,
             last_update: candidate.time,
             last_update_revolution: 0, // Will be set by tracker on first update
             update_count: 1,
@@ -623,6 +626,18 @@ impl TargetTracker {
     /// Get a specific active target by ID
     pub fn get_target(&self, id: u64) -> Option<&ActiveTarget> {
         self.active_targets.get(&id)
+    }
+
+    /// Remove a target by ID (cancel tracking)
+    /// Returns true if target was found and removed
+    pub fn remove_target(&mut self, id: u64) -> bool {
+        if self.active_targets.remove(&id).is_some() {
+            log::info!("Target {} removed (tracking cancelled)", id);
+            true
+        } else {
+            log::warn!("Target {} not found for removal", id);
+            false
+        }
     }
 
     /// Get number of active targets (including those in Acquiring status)

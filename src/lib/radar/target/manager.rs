@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
+use std::time::{Duration, UNIX_EPOCH};
 
+use chrono::{DateTime, Utc};
 use tokio::sync::{broadcast, mpsc};
 
 use super::blob::CompletedBlob;
@@ -73,10 +75,18 @@ pub struct MarpaRequest {
 }
 
 /// Command sent to the tracker manager
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum TrackerCommand {
     /// MARPA request from user click
     Marpa(MarpaRequest),
+    /// Delete a target by ID
+    DeleteTarget { radar_key: String, target_id: u64 },
+    /// Get all targets for a radar (or all radars if radar_key is None)
+    GetTargets {
+        radar_key: Option<String>,
+        radar_position: Option<GeoPosition>,
+        response_tx: tokio::sync::oneshot::Sender<Vec<ArpaTargetApi>>,
+    },
 }
 
 /// Manages target trackers for all radars
@@ -300,6 +310,29 @@ impl TrackerManager {
         target_id
     }
 
+    /// Delete a target by ID (cancel tracking)
+    pub fn delete_target(&mut self, radar_key: &str, target_id: u64) -> bool {
+        log::info!("Delete target {} for radar {}", target_id, radar_key);
+
+        let deleted = if self.merge_mode {
+            if let Some(ref mut tracker) = self.shared_tracker {
+                tracker.remove_target(target_id)
+            } else {
+                false
+            }
+        } else if let Some(tracker) = self.per_radar_trackers.get_mut(radar_key) {
+            tracker.remove_target(target_id)
+        } else {
+            false
+        };
+
+        if deleted {
+            self.broadcast_deletion(target_id, radar_key);
+        }
+
+        deleted
+    }
+
     /// Run the tracker manager, receiving blobs and MARPA requests
     pub async fn run(mut self, mut blob_rx: mpsc::Receiver<BlobMessage>) {
         use std::time::{Duration, Instant};
@@ -332,6 +365,22 @@ impl TrackerManager {
                     match command {
                         TrackerCommand::Marpa(request) => {
                             self.process_marpa(request);
+                        }
+                        TrackerCommand::DeleteTarget { radar_key, target_id } => {
+                            self.delete_target(&radar_key, target_id);
+                        }
+                        TrackerCommand::GetTargets { radar_key, radar_position, response_tx } => {
+                            let targets = self.get_targets_api(radar_position);
+                            // Filter by radar_key if specified (only relevant in non-merged mode)
+                            let targets = if let Some(_key) = radar_key {
+                                // In merged mode, all targets are shared so we return all
+                                // In per-radar mode, get_targets_api already returns all,
+                                // but we could filter here if needed in the future
+                                targets
+                            } else {
+                                targets
+                            };
+                            let _ = response_tx.send(targets);
                         }
                     }
                 }
@@ -496,6 +545,13 @@ fn active_target_to_api(
     // Calculate CPA/TCPA if we have own-ship motion data
     let danger = calculate_danger(target, radar_position);
 
+    // Motion is only included when we have computed SOG/COG.
+    // This distinguishes "unknown motion" (acquiring) from "stationary" (speed=0).
+    let motion = match (target.sog, target.cog) {
+        (Some(speed), Some(course)) => Some(TargetMotionApi { course, speed }),
+        _ => None,
+    };
+
     ArpaTargetApi {
         id: target.id,
         status: status_str.to_string(),
@@ -505,14 +561,19 @@ fn active_target_to_api(
             latitude: Some(target.position.lat()),
             longitude: Some(target.position.lon()),
         },
-        motion: TargetMotionApi {
-            course: target.cog.unwrap_or(0.0),
-            speed: target.sog.unwrap_or(0.0),
-        },
+        motion,
         danger,
         acquisition: if target.is_manual { "manual" } else { "auto" }.to_string(),
         source_zone: target.source_zone,
+        first_seen: millis_to_iso8601(target.first_seen),
+        last_seen: millis_to_iso8601(target.last_update),
     }
+}
+
+/// Convert milliseconds since epoch to ISO 8601 timestamp string
+fn millis_to_iso8601(millis: u64) -> String {
+    let datetime: DateTime<Utc> = (UNIX_EPOCH + Duration::from_millis(millis)).into();
+    datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// Calculate CPA/TCPA danger assessment for a target

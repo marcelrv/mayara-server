@@ -33,7 +33,7 @@ use mayara::{
     radar::{
         GeoPosition, Legend, RadarError, RadarInfo, SharedRadars,
         settings::{BareControlValue, Control, ControlId, ControlValue, RadarControlValue},
-        target::{MarpaRequest, TrackerCommand},
+        target::{ArpaTargetApi, MarpaRequest, TrackerCommand},
     },
     stream::{ActiveSubscriptions, Desubscription, SignalKDelta, Subscribe, Subscription},
 };
@@ -49,8 +49,8 @@ const INTERFACES_URI: &str = "/signalk/v2/api/vessels/self/radars/interfaces";
 const RADAR_CONTROLS_URI: &str = "/signalk/v2/api/vessels/self/radars/{radar_id}/controls";
 const RADAR_CONTROL_URI: &str =
     "/signalk/v2/api/vessels/self/radars/{radar_id}/controls/{control_id}";
-const RADAR_ACQUIRE_TARGET_URI: &str =
-    "/signalk/v2/api/vessels/self/radars/{radar_id}/targets/acquire";
+const RADAR_TARGETS_URI: &str = "/signalk/v2/api/vessels/self/radars/{radar_id}/targets";
+const RADAR_TARGET_URI: &str = "/signalk/v2/api/vessels/self/radars/{radar_id}/targets/{target_id}";
 
 #[derive(OpenApi)]
 #[openapi(
@@ -75,7 +75,9 @@ const RADAR_ACQUIRE_TARGET_URI: &str =
         get_control_values,
         get_control_value,
         set_control_value,
+        get_targets,
         acquire_target,
+        delete_target,
         control_stream_docs,
     ),
     components(schemas(
@@ -87,7 +89,9 @@ const RADAR_ACQUIRE_TARGET_URI: &str =
         Interfaces,
         Capabilities,
         BareControlValue,
-        // Target acquisition types
+        // Target types
+        TargetsResponse,
+        ArpaTargetApi,
         AcquireTargetRequest,
         AcquireTargetResponse,
         // WebSocket message types
@@ -110,7 +114,8 @@ pub(crate) fn routes(axum: axum::Router<Web>) -> axum::Router<Web> {
             RADAR_CONTROL_URI,
             get(get_control_value).put(set_control_value),
         )
-        .route(RADAR_ACQUIRE_TARGET_URI, axum::routing::post(acquire_target))
+        .route(RADAR_TARGETS_URI, get(get_targets).post(acquire_target))
+        .route(RADAR_TARGET_URI, axum::routing::delete(delete_target))
         .route(OPENAPI_URI, get(openapi_json))
         .merge(SwaggerUi::new("/swagger-ui").config(SwaggerConfig::new([OPENAPI_URI])))
 }
@@ -621,7 +626,7 @@ struct AcquireTargetResponse {
 
 #[utoipa::path(
     post,
-    path = "/signalk/v2/api/vessels/self/radars/{radar_id}/targets/acquire",
+    path = "/signalk/v2/api/vessels/self/radars/{radar_id}/targets",
     summary = "Acquire a target at position",
     description = "Manually acquire an ARPA target at the specified geographic position. \
                    The target will be tracked and reported via the delta stream. \
@@ -727,6 +732,166 @@ async fn acquire_target(
         radar_id: radar.key(),
     })
     .into_response()
+}
+
+/// Response for GET /targets endpoint
+#[derive(Serialize, ToSchema)]
+struct TargetsResponse {
+    /// ISO 8601 timestamp when response was generated
+    timestamp: String,
+    /// List of tracked targets
+    targets: Vec<ArpaTargetApi>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/signalk/v2/api/vessels/self/radars/{radar_id}/targets",
+    summary = "Get tracked targets",
+    description = "Returns all currently tracked ARPA/MARPA targets for this radar. \
+                   Targets include position, motion, and danger assessment data.",
+    params(
+        ("radar_id" = String, Path, description = "Radar identifier", example = "nav1034A")
+    ),
+    responses(
+        (status = 200, body = TargetsResponse, description = "List of tracked targets"),
+        (status = 400, description = "Target tracking not enabled"),
+        (status = 404, description = "Radar not found")
+    ),
+    tag = "Targets"
+)]
+async fn get_targets(
+    Path(radar_id): Path<String>,
+    State(state): State<Web>,
+) -> Response {
+    log::debug!("Get targets for radar {}", radar_id);
+
+    // Verify radar exists
+    if state.radars.get_by_key(&radar_id).is_none() {
+        return RadarError::NoSuchRadar(radar_id).into_response();
+    }
+
+    // Get current radar position from navigation data
+    let radar_position = navdata::get_radar_position();
+
+    // Get tracker command channel
+    let command_tx = match state.radars.get_tracker_command_tx() {
+        Some(tx) => tx,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Target tracking not enabled (use --targets arpa)".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    // Create oneshot channel for response
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    // Send get targets command
+    if let Err(e) = command_tx
+        .send(TrackerCommand::GetTargets {
+            radar_key: Some(radar_id),
+            radar_position,
+            response_tx,
+        })
+        .await
+    {
+        log::error!("Failed to send get targets request: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to send get targets request".to_string(),
+        )
+            .into_response();
+    }
+
+    // Wait for response
+    match response_rx.await {
+        Ok(targets) => {
+            let response = TargetsResponse {
+                timestamp: Utc::now().to_rfc3339(),
+                targets,
+            };
+            Json(response).into_response()
+        }
+        Err(e) => {
+            log::error!("Failed to receive targets response: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to receive targets response".to_string(),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Parameters for target-specific endpoints
+#[derive(Deserialize, ToSchema)]
+#[allow(dead_code)] // Instantiation hidden in extractor
+struct RadarTargetIdParam {
+    /// Radar identifier (e.g., 'nav1034A')
+    #[schema(example = "nav1034A")]
+    radar_id: String,
+    /// Target identifier
+    #[schema(example = 1)]
+    target_id: u64,
+}
+
+#[utoipa::path(
+    delete,
+    path = "/signalk/v2/api/vessels/self/radars/{radar_id}/targets/{target_id}",
+    summary = "Cancel target tracking",
+    description = "Stops tracking a specific target. The target will be removed and \
+                   a null update broadcast via the delta stream.",
+    params(
+        ("radar_id" = String, Path, description = "Radar identifier", example = "nav1034A"),
+        ("target_id" = u64, Path, description = "Target identifier", example = 1)
+    ),
+    responses(
+        (status = 200, description = "Target tracking cancelled"),
+        (status = 400, description = "Target tracking not enabled"),
+        (status = 404, description = "Radar or target not found")
+    ),
+    tag = "Targets"
+)]
+async fn delete_target(
+    Path(params): Path<RadarTargetIdParam>,
+    State(state): State<Web>,
+) -> Response {
+    let (radar_id, target_id) = (params.radar_id, params.target_id);
+    log::info!("Delete target {} for radar {}", target_id, radar_id);
+
+    // Verify radar exists
+    if state.radars.get_by_key(&radar_id).is_none() {
+        return RadarError::NoSuchRadar(radar_id).into_response();
+    }
+
+    // Get tracker command channel
+    let command_tx = match state.radars.get_tracker_command_tx() {
+        Some(tx) => tx,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Target tracking not enabled (use --targets arpa)".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    // Send delete command
+    if let Err(e) = command_tx.try_send(TrackerCommand::DeleteTarget {
+        radar_key: radar_id,
+        target_id,
+    }) {
+        log::error!("Failed to send delete target request: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to send delete request".to_string(),
+        )
+            .into_response();
+    }
+
+    StatusCode::OK.into_response()
 }
 
 #[utoipa::path(

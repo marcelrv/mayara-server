@@ -50,9 +50,10 @@ pub struct ArpaTargetApi {
     pub status: String,
     /// Target position relative to radar
     pub position: TargetPositionApi,
-    /// Target motion (course and speed) - omitted if both values are zero
-    #[serde(skip_serializing_if = "TargetMotionApi::is_zero")]
-    pub motion: TargetMotionApi,
+    /// Target motion (course and speed) - omitted if motion not yet known.
+    /// Present with zero values for confirmed stationary targets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion: Option<TargetMotionApi>,
     /// Collision danger assessment - omitted if vessels diverging
     #[serde(skip_serializing_if = "TargetDangerApi::is_empty")]
     pub danger: TargetDangerApi,
@@ -61,6 +62,10 @@ pub struct ArpaTargetApi {
     /// Which guard zone acquired this target (1 or 2), or 0 for manual
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_zone: Option<u8>,
+    /// ISO 8601 timestamp when target was first seen
+    pub first_seen: String,
+    /// ISO 8601 timestamp when target was last updated
+    pub last_seen: String,
 }
 
 /// Target position in the API format
@@ -86,12 +91,6 @@ pub struct TargetMotionApi {
     pub course: f64,
     /// Speed in m/s
     pub speed: f64,
-}
-
-impl TargetMotionApi {
-    fn is_zero(&self) -> bool {
-        self.course == 0.0 && self.speed == 0.0
-    }
 }
 
 /// Collision danger assessment in the API format.
