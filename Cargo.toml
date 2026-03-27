@@ -19,8 +19,6 @@ furuno = []
 garmin = []
 raymarine = []
 emulator = []
-# Serve GUI files from filesystem instead of embedded (for development)
-dev = []
 # default = ["navico", "furuno", "raymarine"]
 default = ["navico", "furuno", "garmin", "raymarine", "emulator"]
 

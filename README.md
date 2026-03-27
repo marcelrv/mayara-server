@@ -9,6 +9,18 @@ __Note: no implication that this software will actually be available in any of t
 On the "client" side, it will offer a [Signal K](https://signalk.org) API for basic information and a `WebSocket` server for the actual radar data.
 Changing the radar settings is possible, a [JSON Schema](https://json-schema.org) explains what settings can be made.
 
+## Using `mayara-server`
+
+See [USAGE.md](USAGE.md) for command line options and examples.
+
+## Building from Source
+
+See [BUILDING.md](BUILDING.md) for instructions on installing Rust and building on Windows, Linux, and macOS.
+
+## Status
+
+See [TODO](TODO.md)
+
 ## Origins
 
 This is basically a rewrite of the [OpenCPN radar plugin](https://github.com/opencpn-radar-pi/radar_pi) that I have worked over ten years or so.
@@ -33,18 +45,12 @@ The following radars are fully supported right now:
 
 We are working on:
 
-* Furuno, many models, but certainly and primarily DRS4D-NXT.
-
-Full support is planned for:
-
-* Raymarine HD digital radars and possibly even older radars connected to an E series display with Ethernet.
-* Garmin (x)HD.
+* Furuno, many models, but certainly and primarily DRS4D-NXT. Seems to work but needs extensive testing.
+* Garmin xHD. xHD seems to work read-only, command sending to be tested.
+* Garmin HD. HD has been coded but not tested. PCAP files welcome!
+* Raymarine HD digital radars are likewise implemented but fully untested.
 
 We are actively looking for people to add new radars. If your radar is not on the "fully supported" list, contact us!
-
-## Status
-
-See [TODO](TODO.md)
 
 ## Help us
 
