@@ -6,11 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Sections can be: Added Changed Deprecated Removed Fixed Security.
 
-## [Unreleased]
+## [Unreleased, probably 3.1.1]
 
 ### Fixed
 
 ### Added
+
+#21 - Add Garmin support for old Garmin radars (HD, xHD)
+
 
 ## [3.1.0]
 

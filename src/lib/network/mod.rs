@@ -137,13 +137,6 @@ fn bind_to_multicast(
     addr: &SocketAddrV4,
     nic_addr: &Ipv4Addr,
 ) -> io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let nic_addr = if G_REPLAY.load(std::sync::atomic::Ordering::Relaxed) {
-        &Ipv4Addr::UNSPECIFIED
-    } else {
-        nic_addr
-    };
-
     // Linux is special, if we don't disable IP_MULTICAST_ALL the kernel forgets on
     // which device the multicast packet arrived and sends it to all sockets.
     #[cfg(target_os = "linux")]

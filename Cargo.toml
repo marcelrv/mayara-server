@@ -1,6 +1,6 @@
 [package]
 name = "mayara"
-version = "3.1.0"
+version = "3.1.1"
 edition = "2024"
 rust-version = "1.90"
 description = "Marine radar server with REST API and WebSocket support"
@@ -22,7 +22,7 @@ emulator = []
 # Serve GUI files from filesystem instead of embedded (for development)
 dev = []
 # default = ["navico", "furuno", "raymarine"]
-default = ["navico", "furuno", "raymarine", "emulator"]
+default = ["navico", "furuno", "garmin", "raymarine", "emulator"]
 
 [dependencies]
 ctor = "0.1"

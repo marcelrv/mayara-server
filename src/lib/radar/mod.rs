@@ -110,7 +110,6 @@ impl IntoResponse for RadarError {
 #[serde(rename_all = "camelCase")]
 enum PixelType {
     Normal,
-    BlobContour,
     DopplerApproaching,
     DopplerReceding,
     History,
@@ -904,13 +903,6 @@ fn default_legend(targets: &TargetMode, doppler: bool, pixel_values: u8) -> Lege
             r#type: PixelType::History, // Reuse History type for static background
             color: Color::from("#505050"),
         });
-
-        // Blob contour color (bright red) for detected targets
-        legend.blob_contour = Some(legend.pixels.len() as u8);
-        legend.pixels.push(Lookup {
-            r#type: PixelType::BlobContour,
-            color: Color::from("#ffffff"), // White for testing
-        });
     }
 
     if doppler {
@@ -1073,10 +1065,14 @@ impl CommonRadar {
                 if let Some(ref mut detector) = self.blob_detector {
                     match cv.id {
                         ControlId::GuardZone1 => {
-                            detector.set_guard_zone_1(self.info.controls.guard_zone(&ControlId::GuardZone1));
+                            detector.set_guard_zone_1(
+                                self.info.controls.guard_zone(&ControlId::GuardZone1),
+                            );
                         }
                         ControlId::GuardZone2 => {
-                            detector.set_guard_zone_2(self.info.controls.guard_zone(&ControlId::GuardZone2));
+                            detector.set_guard_zone_2(
+                                self.info.controls.guard_zone(&ControlId::GuardZone2),
+                            );
                         }
                         _ => {}
                     }
@@ -1144,9 +1140,28 @@ impl CommonRadar {
         range: u32,
         angle: SpokeBearing,
         heading: Option<u16>,
-        generic_spoke: GenericSpoke,
+        mut generic_spoke: GenericSpoke,
     ) {
         if let Some(message) = &mut self.spoke_message {
+            // In replay mode, draw a circle at extreme range for visual indication
+            if self.replay && generic_spoke.len() >= 2 {
+                let max_pixel = self.info.legend.pixel_colors.saturating_sub(1);
+                let len = generic_spoke.len();
+                generic_spoke[len - 2] = max_pixel;
+                generic_spoke[len - 1] = max_pixel;
+            }
+
+            if log::log_enabled!(log::Level::Trace) {
+                // Verify spoke contains legal values
+                for i in 0..generic_spoke.len() {
+                    if generic_spoke[i] >= self.info.legend.pixel_colors {
+                        panic!(
+                            "Spoke contains value {} which is > {}",
+                            generic_spoke[i], self.info.legend.pixel_colors
+                        );
+                    }
+                }
+            }
             let spoke = to_protobuf_spoke(
                 self.info.spokes_per_revolution,
                 range,

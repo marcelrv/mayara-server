@@ -490,7 +490,15 @@ impl NavicoReportReceiver {
 
         let pixel_to_blob = pixel_to_blob(&info.get_legend());
 
-        let common = CommonRadar::new(&args, key, info, radars.clone(), control_update_rx, replay, blob_tx);
+        let common = CommonRadar::new(
+            &args,
+            key,
+            info,
+            radars.clone(),
+            control_update_rx,
+            replay,
+            blob_tx,
+        );
 
         let now = Instant::now();
         NavicoReportReceiver {
@@ -815,15 +823,6 @@ impl NavicoReportReceiver {
 
         for pixel in spoke {
             let pixel = *pixel as usize;
-            generic_spoke.push(pixel_to_blob[low_nibble_index][pixel]);
-            generic_spoke.push(pixel_to_blob[high_nibble_index][pixel]);
-        }
-
-        if self.common.replay {
-            // Generate circle at extreme range
-            let pixel = 0xff as usize;
-            generic_spoke.pop();
-            generic_spoke.pop();
             generic_spoke.push(pixel_to_blob[low_nibble_index][pixel]);
             generic_spoke.push(pixel_to_blob[high_nibble_index][pixel]);
         }

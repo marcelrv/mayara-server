@@ -27,6 +27,7 @@ pub(crate) enum LocatorId {
     GenBR24,
     Gen3Plus,
     Furuno,
+    Garmin,
     Raymarine,
 }
 
@@ -57,6 +58,11 @@ pub(crate) fn create_brand_listeners(
     if args.brand.unwrap_or(Brand::Raymarine) == Brand::Raymarine {
         raymarine::new(args, listen_addresses);
         brands.insert(Brand::Raymarine);
+    }
+    #[cfg(feature = "garmin")]
+    if args.brand.unwrap_or(Brand::Garmin) == Brand::Garmin {
+        garmin::new(args, listen_addresses);
+        brands.insert(Brand::Garmin);
     }
 }
 
