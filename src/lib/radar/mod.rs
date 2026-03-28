@@ -19,6 +19,7 @@ use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle};
 use utoipa::ToSchema;
 
 pub mod cpa;
+pub mod exclusion;
 pub mod range;
 pub mod settings;
 pub mod spoke;
@@ -986,6 +987,13 @@ pub(crate) struct CommonRadar {
     prev_angle: SpokeBearing,
     spoke_count: u32,
     max_spoke_length: u32,
+
+    // Exclusion zones (stationary installations only)
+    exclusion_zones: [Option<crate::config::ExclusionZone>; 4],
+    exclusion_rects: [Option<crate::config::ExclusionRect>; 4],
+    exclusion_mask: Option<exclusion::ExclusionMask>,
+    current_exclusion_range: u32,
+    current_exclusion_spoke_len: usize,
 }
 
 impl CommonRadar {
@@ -1021,6 +1029,26 @@ impl CommonRadar {
             detector
         });
 
+        // Initialize exclusion zones from control values (stationary only)
+        let exclusion_zones = [
+            info.controls
+                .exclusion_zone(&ControlId::ExclusionZone1),
+            info.controls
+                .exclusion_zone(&ControlId::ExclusionZone2),
+            info.controls
+                .exclusion_zone(&ControlId::ExclusionZone3),
+            info.controls
+                .exclusion_zone(&ControlId::ExclusionZone4),
+        ];
+
+        // Initialize rectangular exclusion zones from control values (stationary only)
+        let exclusion_rects = [
+            info.controls.exclusion_rect(&ControlId::ExclusionRect1),
+            info.controls.exclusion_rect(&ControlId::ExclusionRect2),
+            info.controls.exclusion_rect(&ControlId::ExclusionRect3),
+            info.controls.exclusion_rect(&ControlId::ExclusionRect4),
+        ];
+
         CommonRadar {
             key,
             info,
@@ -1035,6 +1063,11 @@ impl CommonRadar {
             prev_angle: 0,
             spoke_count: 0,
             max_spoke_length: 0,
+            exclusion_zones,
+            exclusion_rects,
+            exclusion_mask: None,
+            current_exclusion_range: 0,
+            current_exclusion_spoke_len: 0,
         }
     }
 
@@ -1092,7 +1125,52 @@ impl CommonRadar {
                     }
                 }
 
-                // Handle ARPA/target tracking controls directly - they just need to be stored and persisted
+                // Update exclusion zones when those controls change
+                match cv.id {
+                    ControlId::ExclusionZone1 => {
+                        self.exclusion_zones[0] =
+                            self.info.controls.exclusion_zone(&ControlId::ExclusionZone1);
+                        self.current_exclusion_range = 0; // Force mask rebuild
+                    }
+                    ControlId::ExclusionZone2 => {
+                        self.exclusion_zones[1] =
+                            self.info.controls.exclusion_zone(&ControlId::ExclusionZone2);
+                        self.current_exclusion_range = 0;
+                    }
+                    ControlId::ExclusionZone3 => {
+                        self.exclusion_zones[2] =
+                            self.info.controls.exclusion_zone(&ControlId::ExclusionZone3);
+                        self.current_exclusion_range = 0;
+                    }
+                    ControlId::ExclusionZone4 => {
+                        self.exclusion_zones[3] =
+                            self.info.controls.exclusion_zone(&ControlId::ExclusionZone4);
+                        self.current_exclusion_range = 0;
+                    }
+                    ControlId::ExclusionRect1 => {
+                        self.exclusion_rects[0] =
+                            self.info.controls.exclusion_rect(&ControlId::ExclusionRect1);
+                        self.current_exclusion_range = 0; // Force mask rebuild
+                    }
+                    ControlId::ExclusionRect2 => {
+                        self.exclusion_rects[1] =
+                            self.info.controls.exclusion_rect(&ControlId::ExclusionRect2);
+                        self.current_exclusion_range = 0;
+                    }
+                    ControlId::ExclusionRect3 => {
+                        self.exclusion_rects[2] =
+                            self.info.controls.exclusion_rect(&ControlId::ExclusionRect3);
+                        self.current_exclusion_range = 0;
+                    }
+                    ControlId::ExclusionRect4 => {
+                        self.exclusion_rects[3] =
+                            self.info.controls.exclusion_rect(&ControlId::ExclusionRect4);
+                        self.current_exclusion_range = 0;
+                    }
+                    _ => {}
+                }
+
+                // Handle ARPA/target tracking and exclusion zone controls directly
                 match cv.id {
                     ControlId::ArpaDetectMaxSpeed => {
                         let value = cv.as_value()?;
@@ -1106,6 +1184,14 @@ impl CommonRadar {
                             self.update(); // Persist the change
                         }
                         return result;
+                    }
+                    ControlId::ExclusionZone1
+                    | ControlId::ExclusionZone2
+                    | ControlId::ExclusionZone3
+                    | ControlId::ExclusionZone4 => {
+                        // Exclusion zones are already updated above, just persist and return
+                        self.update();
+                        return Ok(());
                     }
                     _ => {}
                 }
@@ -1149,6 +1235,67 @@ impl CommonRadar {
             .unwrap();
     }
 
+    /// Refresh exclusion mask when range or spoke length changes.
+    /// Only applies to stationary installations.
+    fn refresh_exclusion_mask(&mut self, range: u32, spoke_len: usize) {
+        if !self.info.stationary {
+            return;
+        }
+
+        // Check if we need to rebuild the mask
+        if range == self.current_exclusion_range
+            && spoke_len == self.current_exclusion_spoke_len
+            && self.exclusion_mask.is_some()
+        {
+            return;
+        }
+
+        self.current_exclusion_range = range;
+        self.current_exclusion_spoke_len = spoke_len;
+
+        // Collect enabled sector zones
+        let active_zones: Vec<exclusion::ExclusionZoneInternal> = self
+            .exclusion_zones
+            .iter()
+            .filter_map(|z| z.as_ref())
+            .filter(|z| z.enabled)
+            .map(|z| {
+                exclusion::zone_to_internal(z, self.info.spokes_per_revolution, range, spoke_len)
+            })
+            .collect();
+
+        // Collect enabled rectangular zones
+        let active_rects: Vec<exclusion::ExclusionRectInternal> = self
+            .exclusion_rects
+            .iter()
+            .filter_map(|r| r.as_ref())
+            .filter(|r| r.enabled)
+            .map(|r| exclusion::rect_to_internal(r))
+            .collect();
+
+        if active_zones.is_empty() && active_rects.is_empty() {
+            self.exclusion_mask = None;
+            return;
+        }
+
+        log::debug!(
+            "{}: Building exclusion mask for {} sector zones + {} rects, range={}m, spoke_len={}",
+            self.key,
+            active_zones.len(),
+            active_rects.len(),
+            range,
+            spoke_len
+        );
+
+        self.exclusion_mask = Some(exclusion::ExclusionMask::new(
+            &active_zones,
+            &active_rects,
+            self.info.spokes_per_revolution,
+            spoke_len,
+            range,
+        ));
+    }
+
     pub(crate) fn add_spoke(
         &mut self,
         range: u32,
@@ -1156,6 +1303,11 @@ impl CommonRadar {
         heading: Option<u16>,
         mut generic_spoke: GenericSpoke,
     ) {
+        // Refresh exclusion mask before borrowing spoke_message
+        if self.info.stationary {
+            self.refresh_exclusion_mask(range, generic_spoke.len());
+        }
+
         if let Some(message) = &mut self.spoke_message {
             // In replay mode, draw a circle at extreme range for visual indication
             if self.replay && generic_spoke.len() >= 2 {
@@ -1163,6 +1315,16 @@ impl CommonRadar {
                 let len = generic_spoke.len();
                 generic_spoke[len - 2] = max_pixel;
                 generic_spoke[len - 1] = max_pixel;
+            }
+
+            // Apply exclusion zones for stationary installations
+            // Pixels in exclusion zones are set to 0 (transparent)
+            if let Some(ref mask) = self.exclusion_mask {
+                for (pixel_idx, pixel) in generic_spoke.iter_mut().enumerate() {
+                    if mask.is_excluded(angle, pixel_idx) {
+                        *pixel = 0;
+                    }
+                }
             }
 
             if log::log_enabled!(log::Level::Trace) {

@@ -31,6 +31,21 @@ pub struct GuardZone {
     pub enabled: bool,
 }
 
+/// Exclusion zone for stationary radar installations.
+/// Areas within exclusion zones are displayed differently and targets are not tracked.
+pub type ExclusionZone = GuardZone;
+
+/// Rectangular exclusion zone for stationary radar installations.
+/// Defined by north/south/east/west offsets in meters from radar position.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+pub struct ExclusionRect {
+    pub north: f64, // North offset in meters (positive = north of radar)
+    pub south: f64, // South offset in meters (positive = south of radar)
+    pub east: f64,  // East offset in meters (positive = east of radar)
+    pub west: f64,  // West offset in meters (positive = west of radar)
+    pub enabled: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct Radar {
     pub id: usize,
@@ -49,6 +64,26 @@ pub struct Radar {
     pub guard_zone_1: Option<GuardZone>,
     #[serde(default)]
     pub guard_zone_2: Option<GuardZone>,
+
+    // Exclusion zones (stationary installations only)
+    #[serde(default)]
+    pub exclusion_zone_1: Option<ExclusionZone>,
+    #[serde(default)]
+    pub exclusion_zone_2: Option<ExclusionZone>,
+    #[serde(default)]
+    pub exclusion_zone_3: Option<ExclusionZone>,
+    #[serde(default)]
+    pub exclusion_zone_4: Option<ExclusionZone>,
+
+    // Rectangular exclusion zones (stationary installations only)
+    #[serde(default)]
+    pub exclusion_rect_1: Option<ExclusionRect>,
+    #[serde(default)]
+    pub exclusion_rect_2: Option<ExclusionRect>,
+    #[serde(default)]
+    pub exclusion_rect_3: Option<ExclusionRect>,
+    #[serde(default)]
+    pub exclusion_rect_4: Option<ExclusionRect>,
 
     // ARPA/Target tracking settings
     #[serde(default)]
@@ -214,6 +249,54 @@ impl Persistence {
             modified = true;
         }
 
+        let exclusion_zone_1 = radar_info.controls.exclusion_zone(&ControlId::ExclusionZone1);
+        if radar.exclusion_zone_1 != exclusion_zone_1 {
+            radar.exclusion_zone_1 = exclusion_zone_1;
+            modified = true;
+        }
+
+        let exclusion_zone_2 = radar_info.controls.exclusion_zone(&ControlId::ExclusionZone2);
+        if radar.exclusion_zone_2 != exclusion_zone_2 {
+            radar.exclusion_zone_2 = exclusion_zone_2;
+            modified = true;
+        }
+
+        let exclusion_zone_3 = radar_info.controls.exclusion_zone(&ControlId::ExclusionZone3);
+        if radar.exclusion_zone_3 != exclusion_zone_3 {
+            radar.exclusion_zone_3 = exclusion_zone_3;
+            modified = true;
+        }
+
+        let exclusion_zone_4 = radar_info.controls.exclusion_zone(&ControlId::ExclusionZone4);
+        if radar.exclusion_zone_4 != exclusion_zone_4 {
+            radar.exclusion_zone_4 = exclusion_zone_4;
+            modified = true;
+        }
+
+        let exclusion_rect_1 = radar_info.controls.exclusion_rect(&ControlId::ExclusionRect1);
+        if radar.exclusion_rect_1 != exclusion_rect_1 {
+            radar.exclusion_rect_1 = exclusion_rect_1;
+            modified = true;
+        }
+
+        let exclusion_rect_2 = radar_info.controls.exclusion_rect(&ControlId::ExclusionRect2);
+        if radar.exclusion_rect_2 != exclusion_rect_2 {
+            radar.exclusion_rect_2 = exclusion_rect_2;
+            modified = true;
+        }
+
+        let exclusion_rect_3 = radar_info.controls.exclusion_rect(&ControlId::ExclusionRect3);
+        if radar.exclusion_rect_3 != exclusion_rect_3 {
+            radar.exclusion_rect_3 = exclusion_rect_3;
+            modified = true;
+        }
+
+        let exclusion_rect_4 = radar_info.controls.exclusion_rect(&ControlId::ExclusionRect4);
+        if radar.exclusion_rect_4 != exclusion_rect_4 {
+            radar.exclusion_rect_4 = exclusion_rect_4;
+            modified = true;
+        }
+
         let arpa_max_speed = radar_info.controls.arpa_detect_max_speed();
         if radar.arpa_max_speed != arpa_max_speed {
             radar.arpa_max_speed = arpa_max_speed;
@@ -244,6 +327,38 @@ impl Persistence {
             }
             if let Some(zone) = &p.guard_zone_2 {
                 info.controls.set_guard_zone(&ControlId::GuardZone2, zone);
+            }
+            if let Some(zone) = &p.exclusion_zone_1 {
+                info.controls
+                    .set_exclusion_zone(&ControlId::ExclusionZone1, zone);
+            }
+            if let Some(zone) = &p.exclusion_zone_2 {
+                info.controls
+                    .set_exclusion_zone(&ControlId::ExclusionZone2, zone);
+            }
+            if let Some(zone) = &p.exclusion_zone_3 {
+                info.controls
+                    .set_exclusion_zone(&ControlId::ExclusionZone3, zone);
+            }
+            if let Some(zone) = &p.exclusion_zone_4 {
+                info.controls
+                    .set_exclusion_zone(&ControlId::ExclusionZone4, zone);
+            }
+            if let Some(rect) = &p.exclusion_rect_1 {
+                info.controls
+                    .set_exclusion_rect(&ControlId::ExclusionRect1, rect);
+            }
+            if let Some(rect) = &p.exclusion_rect_2 {
+                info.controls
+                    .set_exclusion_rect(&ControlId::ExclusionRect2, rect);
+            }
+            if let Some(rect) = &p.exclusion_rect_3 {
+                info.controls
+                    .set_exclusion_rect(&ControlId::ExclusionRect3, rect);
+            }
+            if let Some(rect) = &p.exclusion_rect_4 {
+                info.controls
+                    .set_exclusion_rect(&ControlId::ExclusionRect4, rect);
             }
             info.controls.set_arpa_max_speed(p.arpa_max_speed);
         }

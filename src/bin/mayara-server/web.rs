@@ -44,7 +44,9 @@ struct Assets;
 
 #[derive(Error, Debug)]
 pub enum WebError {
-    #[error("Socket operation failed")]
+    #[error("Port {0} is already in use. Another instance of mayara-server may be running, or another application is using this port. Use --port to specify a different port.")]
+    PortInUse(u16),
+    #[error("Socket operation failed: {0}")]
     Io(#[from] io::Error),
 }
 
@@ -71,11 +73,17 @@ impl Web {
     }
 
     pub async fn run(self, subsys: SubsystemHandle) -> Result<(), WebError> {
-        let port = self.args.port.clone();
+        let port = self.args.port;
         let listener =
             TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port))
                 .await
-                .map_err(|e| WebError::Io(e))?;
+                .map_err(|e| {
+                    if e.kind() == io::ErrorKind::AddrInUse {
+                        WebError::PortInUse(port)
+                    } else {
+                        WebError::Io(e)
+                    }
+                })?;
 
         let serve_assets = ServeEmbed::<Assets>::new();
         let mut shutdown_rx = self.shutdown_tx.subscribe();

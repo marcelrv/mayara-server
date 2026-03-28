@@ -95,6 +95,17 @@ pub enum ControlId {
     ArpaDetectMaxSpeed,
     ClearTargets,
 
+    // Exclusion zones (stationary installations only)
+    ExclusionZone1,
+    ExclusionZone2,
+    ExclusionZone3,
+    ExclusionZone4,
+    // Rectangular exclusion zones (stationary installations only)
+    ExclusionRect1,
+    ExclusionRect2,
+    ExclusionRect3,
+    ExclusionRect4,
+
     // Trails
     TargetTrails,
     TrailsMotion,
@@ -206,6 +217,14 @@ impl ControlId {
             | ControlId::NoTransmitSector2
             | ControlId::NoTransmitSector3
             | ControlId::NoTransmitSector4
+            | ControlId::ExclusionZone1
+            | ControlId::ExclusionZone2
+            | ControlId::ExclusionZone3
+            | ControlId::ExclusionZone4
+            | ControlId::ExclusionRect1
+            | ControlId::ExclusionRect2
+            | ControlId::ExclusionRect3
+            | ControlId::ExclusionRect4
             | ControlId::RangeUnits => Category::Installation,
             ControlId::UserName
             | ControlId::ModelName
@@ -264,6 +283,14 @@ impl ControlId {
             ControlId::ClearTargets => "Clear all ARPA targets",
             ControlId::GuardZone1 => "First guard zone for target detection",
             ControlId::GuardZone2 => "Second guard zone for target detection",
+            ControlId::ExclusionZone1 => "First exclusion zone (stationary only)",
+            ControlId::ExclusionZone2 => "Second exclusion zone (stationary only)",
+            ControlId::ExclusionZone3 => "Third exclusion zone (stationary only)",
+            ControlId::ExclusionZone4 => "Fourth exclusion zone (stationary only)",
+            ControlId::ExclusionRect1 => "First rectangular exclusion zone (stationary only)",
+            ControlId::ExclusionRect2 => "Second rectangular exclusion zone (stationary only)",
+            ControlId::ExclusionRect3 => "Third rectangular exclusion zone (stationary only)",
+            ControlId::ExclusionRect4 => "Fourth rectangular exclusion zone (stationary only)",
             ControlId::TargetTrails => "Whether target trails are shown",
             ControlId::TrailsMotion => "How target trails behave",
             ControlId::DopplerTrailsOnly => "Convert only Doppler targets to target trails",
@@ -335,6 +362,14 @@ impl ControlId {
             ControlId::Gain => "Gain",
             ControlId::GuardZone1 => "Guard zone",
             ControlId::GuardZone2 => "Guard zone (2)",
+            ControlId::ExclusionZone1 => "Exclusion zone",
+            ControlId::ExclusionZone2 => "Exclusion zone (2)",
+            ControlId::ExclusionZone3 => "Exclusion zone (3)",
+            ControlId::ExclusionZone4 => "Exclusion zone (4)",
+            ControlId::ExclusionRect1 => "Exclusion rect",
+            ControlId::ExclusionRect2 => "Exclusion rect (2)",
+            ControlId::ExclusionRect3 => "Exclusion rect (3)",
+            ControlId::ExclusionRect4 => "Exclusion rect (4)",
             ControlId::InterferenceRejection => "Interference rejection",
             ControlId::LocalInterferenceRejection => "Local interference rejection",
             ControlId::BirdMode => "Bird mode",
@@ -401,6 +436,14 @@ impl ControlId {
             ControlId::ShowAis => ControlDestination::Internal,
             ControlId::GuardZone1 => ControlDestination::Target,
             ControlId::GuardZone2 => ControlDestination::Target,
+            ControlId::ExclusionZone1 => ControlDestination::Target,
+            ControlId::ExclusionZone2 => ControlDestination::Target,
+            ControlId::ExclusionZone3 => ControlDestination::Target,
+            ControlId::ExclusionZone4 => ControlDestination::Target,
+            ControlId::ExclusionRect1 => ControlDestination::Target,
+            ControlId::ExclusionRect2 => ControlDestination::Target,
+            ControlId::ExclusionRect3 => ControlDestination::Target,
+            ControlId::ExclusionRect4 => ControlDestination::Target,
             ControlId::Sea => ControlDestination::Command,
             ControlId::SeaState => ControlDestination::Command,
             ControlId::Rain => ControlDestination::Command,
@@ -653,6 +696,36 @@ impl SharedControls {
             .wire_units(Units::Degrees)
             .build(&mut controls);
 
+        // Exclusion zones - only for stationary installations
+        if args.stationary {
+            new_zone(ControlId::ExclusionZone1, -180., 180., 100000.)
+                .wire_units(Units::Degrees)
+                .build(&mut controls);
+            new_zone(ControlId::ExclusionZone2, -180., 180., 100000.)
+                .wire_units(Units::Degrees)
+                .build(&mut controls);
+            new_zone(ControlId::ExclusionZone3, -180., 180., 100000.)
+                .wire_units(Units::Degrees)
+                .build(&mut controls);
+            new_zone(ControlId::ExclusionZone4, -180., 180., 100000.)
+                .wire_units(Units::Degrees)
+                .build(&mut controls);
+
+            // Rectangular exclusion zones - only for stationary installations
+            new_rect(ControlId::ExclusionRect1, 100000.)
+                .wire_units(Units::Meters)
+                .build(&mut controls);
+            new_rect(ControlId::ExclusionRect2, 100000.)
+                .wire_units(Units::Meters)
+                .build(&mut controls);
+            new_rect(ControlId::ExclusionRect3, 100000.)
+                .wire_units(Units::Meters)
+                .build(&mut controls);
+            new_rect(ControlId::ExclusionRect4, 100000.)
+                .wire_units(Units::Meters)
+                .build(&mut controls);
+        }
+
         SharedControls {
             controls: Arc::new(RwLock::new(Controls::new_base(
                 radar_id,
@@ -845,6 +918,18 @@ impl SharedControls {
                     )
                     .map_err(|e| RadarError::ControlError(e))?;
                     // Broadcast the update to the radar so blob detector gets updated
+                    return self.send_to_command_handler(cv, reply_tx);
+                }
+
+                // Handle rect controls specially - they have north/south/east/west in meters
+                if c.item.data_type == ControlDataType::Rect {
+                    let north = cv.north.unwrap_or(0.0);
+                    let south = cv.south.unwrap_or(0.0);
+                    let east = cv.east.unwrap_or(0.0);
+                    let west = cv.west.unwrap_or(0.0);
+                    self.set_rect(&cv.id, north, south, east, west, cv.enabled)
+                        .map_err(|e| RadarError::ControlError(e))?;
+                    // Broadcast the update to the radar so exclusion mask gets updated
                     return self.send_to_command_handler(cv, reply_tx);
                 }
 
@@ -1320,6 +1405,35 @@ impl SharedControls {
         }
     }
 
+    /// Set a rectangular exclusion zone with north/south/east/west bounds in meters
+    pub fn set_rect(
+        &self,
+        control_id: &ControlId,
+        north: f64,
+        south: f64,
+        east: f64,
+        west: f64,
+        enabled: Option<bool>,
+    ) -> Result<Option<()>, ControlError> {
+        let control = {
+            let mut locked = self.controls.write().unwrap();
+            if let Some(control) = locked.controls.get_mut(control_id) {
+                Ok(control
+                    .set_rect(north, south, east, west, enabled)?
+                    .map(|_| control.clone()))
+            } else {
+                Err(ControlError::NotSupported(*control_id))
+            }
+        }?;
+
+        if let Some(control) = control {
+            self.send_to_all_clients(&control);
+            Ok(Some(()))
+        } else {
+            Ok(None)
+        }
+    }
+
     #[allow(dead_code)]
     fn get_description(control: &Control) -> Option<String> {
         if let (Some(value), Some(descriptions)) = (control.value, &control.item().descriptions) {
@@ -1431,6 +1545,52 @@ impl SharedControls {
         }
     }
 
+    pub fn exclusion_zone(&self, control_id: &ControlId) -> Option<crate::config::ExclusionZone> {
+        self.get(control_id).and_then(|c| {
+            Some(crate::config::ExclusionZone {
+                start_angle: c.value?,
+                end_angle: c.end_value?,
+                start_distance: c.start_distance?,
+                end_distance: c.end_distance?,
+                enabled: c.enabled.unwrap_or(false),
+            })
+        })
+    }
+
+    pub fn set_exclusion_zone(&self, control_id: &ControlId, zone: &crate::config::ExclusionZone) {
+        let mut locked = self.controls.write().unwrap();
+        if let Some(control) = locked.controls.get_mut(control_id) {
+            control.value = Some(zone.start_angle);
+            control.end_value = Some(zone.end_angle);
+            control.start_distance = Some(zone.start_distance);
+            control.end_distance = Some(zone.end_distance);
+            control.enabled = Some(zone.enabled);
+        }
+    }
+
+    pub fn exclusion_rect(&self, control_id: &ControlId) -> Option<crate::config::ExclusionRect> {
+        self.get(control_id).and_then(|c| {
+            Some(crate::config::ExclusionRect {
+                north: c.north?,
+                south: c.south?,
+                east: c.east?,
+                west: c.west?,
+                enabled: c.enabled.unwrap_or(false),
+            })
+        })
+    }
+
+    pub fn set_exclusion_rect(&self, control_id: &ControlId, rect: &crate::config::ExclusionRect) {
+        let mut locked = self.controls.write().unwrap();
+        if let Some(control) = locked.controls.get_mut(control_id) {
+            control.north = Some(rect.north);
+            control.south = Some(rect.south);
+            control.east = Some(rect.east);
+            control.west = Some(rect.west);
+            control.enabled = Some(rect.enabled);
+        }
+    }
+
     pub(crate) fn set_valid_ranges(&self, ranges: &Ranges) {
         self.controls.write().unwrap().all_ranges = ranges.clone();
 
@@ -1502,6 +1662,15 @@ pub struct ControlValue {
     pub allowed: Option<bool>,
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    // Rectangular exclusion zone fields (meters from radar position)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub north: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub south: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub east: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub west: Option<f64>,
 }
 
 impl ControlValue {
@@ -1518,6 +1687,10 @@ impl ControlValue {
             enabled: None,
             allowed: None,
             error: None,
+            north: None,
+            south: None,
+            east: None,
+            west: None,
         }
     }
 
@@ -1534,6 +1707,10 @@ impl ControlValue {
             enabled: b.enabled,
             allowed: b.allowed,
             error: b.error,
+            north: b.north,
+            south: b.south,
+            east: b.east,
+            west: b.west,
         }
     }
 
@@ -1550,6 +1727,10 @@ impl ControlValue {
             enabled: control.enabled,
             allowed: control.allowed,
             error,
+            north: control.north,
+            south: control.south,
+            east: control.east,
+            west: control.west,
         }
     }
 
@@ -1672,6 +1853,22 @@ pub struct RadarControlValue {
     /// Error message if the control command failed (read-only)
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// North offset for rectangular exclusion zones (meters)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 500.0)]
+    pub north: Option<f64>,
+    /// South offset for rectangular exclusion zones (meters)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 200.0)]
+    pub south: Option<f64>,
+    /// East offset for rectangular exclusion zones (meters)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 300.0)]
+    pub east: Option<f64>,
+    /// West offset for rectangular exclusion zones (meters)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 100.0)]
+    pub west: Option<f64>,
 }
 
 impl RadarControlValue {
@@ -1690,6 +1887,10 @@ impl RadarControlValue {
             enabled: control.enabled,
             allowed: control.allowed,
             error,
+            north: control.north,
+            south: control.south,
+            east: control.east,
+            west: control.west,
         }
     }
 
@@ -1724,6 +1925,10 @@ impl From<RadarControlValue> for ControlValue {
             enabled: rcv.enabled,
             allowed: rcv.allowed,
             error: rcv.error,
+            north: rcv.north,
+            south: rcv.south,
+            east: rcv.east,
+            west: rcv.west,
         }
     }
 }
@@ -1785,6 +1990,22 @@ pub struct BareControlValue {
     /// Error message if the control change failed (read-only)
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// North offset for rectangular exclusion zones (meters)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 500.0)]
+    pub north: Option<f64>,
+    /// South offset for rectangular exclusion zones (meters)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 200.0)]
+    pub south: Option<f64>,
+    /// East offset for rectangular exclusion zones (meters)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 300.0)]
+    pub east: Option<f64>,
+    /// West offset for rectangular exclusion zones (meters)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 100.0)]
+    pub west: Option<f64>,
 }
 
 impl BareControlValue {
@@ -1800,6 +2021,10 @@ impl BareControlValue {
             enabled: None,
             allowed: None,
             error: Some(error),
+            north: None,
+            south: None,
+            east: None,
+            west: None,
         }
     }
 }
@@ -1816,6 +2041,10 @@ impl From<RadarControlValue> for BareControlValue {
             enabled: rcv.enabled,
             allowed: rcv.allowed,
             error: rcv.error,
+            north: rcv.north,
+            south: rcv.south,
+            east: rcv.east,
+            west: rcv.west,
         }
     }
 }
@@ -1833,6 +2062,10 @@ impl From<ControlValue> for BareControlValue {
             enabled: cv.enabled,
             allowed: cv.allowed,
             error: cv.error,
+            north: cv.north,
+            south: cv.south,
+            east: cv.east,
+            west: cv.west,
         }
     }
 }
@@ -2167,6 +2400,39 @@ pub(crate) fn new_zone(
     }
 }
 
+/// Create a rectangular exclusion zone control with north/south/east/west bounds.
+/// All distances are in meters from the radar position.
+pub(crate) fn new_rect(control_id: ControlId, max_distance: f64) -> ControlBuilder {
+    let min_value = Some(0.);
+    let max_value = Some(max_distance);
+    let mut control = Control::new(ControlDefinition::new(
+        control_id,
+        ControlDataType::Rect,
+        Some(0.),
+        None,
+        true, // Rects always have enabled
+        min_value,
+        max_value,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    ));
+    control.item.max_distance = Some(max_distance);
+    control.north = Some(0.);
+    control.south = Some(0.);
+    control.east = Some(0.);
+    control.west = Some(0.);
+    ControlBuilder {
+        control,
+        frozen: false,
+    }
+}
+
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Control {
@@ -2192,6 +2458,15 @@ pub struct Control {
     pub allowed: Option<bool>,
     #[serde(skip)]
     pub needs_refresh: bool, // True when it has been changed and client needs to know value (again)
+    // Rectangular exclusion zone fields (meters from radar position)
+    #[serde(skip)]
+    pub north: Option<f64>,
+    #[serde(skip)]
+    pub south: Option<f64>,
+    #[serde(skip)]
+    pub east: Option<f64>,
+    #[serde(skip)]
+    pub west: Option<f64>,
 }
 
 impl Control {
@@ -2209,6 +2484,10 @@ impl Control {
             description: None,
             allowed: None,
             needs_refresh: false,
+            north: None,
+            south: None,
+            east: None,
+            west: None,
         }
     }
 
@@ -2623,6 +2902,43 @@ impl Control {
         }
     }
 
+    /// Set a rectangular exclusion zone with north/south/east/west bounds.
+    /// All values are in meters from the radar position.
+    pub fn set_rect(
+        &mut self,
+        north: f64,
+        south: f64,
+        east: f64,
+        west: f64,
+        enabled: Option<bool>,
+    ) -> Result<Option<()>, ControlError> {
+        if self.item.data_type != ControlDataType::Rect {
+            return Err(ControlError::NotSupported(self.item.control_id));
+        }
+
+        let changed = self.north != Some(north)
+            || self.south != Some(south)
+            || self.east != Some(east)
+            || self.west != Some(west)
+            || self.enabled != enabled;
+
+        if changed {
+            self.north = Some(north);
+            self.south = Some(south);
+            self.east = Some(east);
+            self.west = Some(west);
+            self.enabled = enabled;
+            self.needs_refresh = false;
+
+            Ok(Some(()))
+        } else if self.needs_refresh || self.item.is_send_always {
+            self.needs_refresh = false;
+            Ok(Some(()))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn set_string(&mut self, value: String) -> Option<()> {
         let value = Some(value);
         if &self.description != &value {
@@ -2721,6 +3037,7 @@ pub enum ControlDataType {
     Button,
     Sector,
     Zone,
+    Rect,
 }
 
 #[derive(Clone, Debug)]

@@ -33,7 +33,7 @@ pub(crate) const EMULATOR_RANGES: &[i32] = &[
     44448, 48000, 59264, 64000, 66672, 72000, 74080, 88896,
 ];
 
-/// Get the initial position for the emulator, considering static-position override
+/// Get the initial position for the emulator, considering static-position/stationary override
 pub(crate) fn get_initial_position(args: &Cli) -> (GeoPosition, f64, f64) {
     if let Some(static_pos) = args.get_static_position() {
         // Use static position with speed = 0
@@ -41,6 +41,13 @@ pub(crate) fn get_initial_position(args: &Cli) -> (GeoPosition, f64, f64) {
             GeoPosition::new(static_pos.lat, static_pos.lon),
             static_pos.heading,
             0.0, // Speed is 0 when using static position
+        )
+    } else if args.stationary {
+        // Stationary mode: use default position but speed = 0
+        (
+            GeoPosition::new(EMULATOR_INITIAL_LAT, EMULATOR_INITIAL_LON),
+            EMULATOR_HEADING,
+            0.0, // Speed is 0 in stationary mode
         )
     } else {
         (
