@@ -10,6 +10,8 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 
 ### Fixed
 
+#23 - Fix recursive call of error handler
+
 ### Added
 
 #21 - Add Garmin support for old Garmin radars (HD, xHD)

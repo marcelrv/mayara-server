@@ -96,10 +96,10 @@ pub enum RadarError {
     OSError(String),
 }
 
-// Tell axum how to convert `AppError` into a response.
+// Tell axum how to convert `RadarError` into a response.
 impl IntoResponse for RadarError {
     fn into_response(self) -> Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, self).into_response()
+        (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
     }
 }
 
@@ -946,6 +946,8 @@ fn default_legend(targets: &TargetMode, doppler: bool, pixel_values: u8) -> Lege
 #[cfg(test)]
 mod tests {
     use super::default_legend;
+    use super::RadarError;
+    use axum::response::IntoResponse;
 
     #[test]
     fn legend() {
@@ -953,6 +955,18 @@ mod tests {
         let legend = default_legend(&targets, true, 16);
         let json = serde_json::to_string_pretty(&legend).unwrap();
         println!("{}", json);
+    }
+
+    #[test]
+    fn radar_error_into_response_not_recursive() {
+        // This test verifies that RadarError::into_response() does not cause
+        // infinite recursion. If the implementation is broken, this test will
+        // cause a stack overflow.
+        let error = RadarError::NoSuchRadar("test".to_string());
+        let response = error.into_response();
+
+        // If we reach here, no stack overflow occurred
+        assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
 
