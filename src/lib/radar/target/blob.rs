@@ -173,7 +173,6 @@ struct GuardZoneInternal {
 /// Blob detector that processes spokes and identifies targets
 pub struct BlobDetector {
     spokes_per_revolution: u16,
-    contour_color: u8,
     /// Minimum pixel intensity to be considered part of a blob (from legend.medium_return)
     threshold: u8,
     next_blob_id: u32,
@@ -189,7 +188,7 @@ pub struct BlobDetector {
 }
 
 impl BlobDetector {
-    pub fn new(spokes_per_revolution: u16, contour_color: u8, threshold: u8) -> Self {
+    pub fn new(spokes_per_revolution: u16, threshold: u8) -> Self {
         let threshold = if threshold > 0 {
             threshold
         } else {
@@ -197,7 +196,6 @@ impl BlobDetector {
         };
         BlobDetector {
             spokes_per_revolution,
-            contour_color,
             threshold,
             next_blob_id: 0,
             active_blobs: Vec::new(),
@@ -521,45 +519,6 @@ impl BlobDetector {
         }
 
         completed
-    }
-
-    /// Draw contours on buffered spokes.
-    /// When debug logging is enabled for the target module, paints all pixels
-    /// in the blob for enhanced visibility.
-    pub fn draw_contours(&mut self, blobs: &[CompletedBlob]) {
-        // In debug mode, paint all pixels for better visibility
-        let paint_all =
-            log::log_enabled!(target: "mayara_server::radar::target", log::Level::Debug);
-
-        for blob in blobs {
-            let mut drawn_count = 0;
-            let pixels_to_draw = if paint_all {
-                &blob.all_pixels
-            } else {
-                &blob.contour
-            };
-
-            for &(blob_spoke_angle, pixel_idx) in pixels_to_draw {
-                for spoke in &mut self.spoke_buffer {
-                    let spoke_angle = spoke.angle as u16 % self.spokes_per_revolution;
-                    if spoke_angle == blob_spoke_angle {
-                        if pixel_idx < spoke.data.len() - 1 {
-                            spoke.data[pixel_idx] = self.contour_color;
-                            spoke.data[pixel_idx + 1] = self.contour_color;
-                            drawn_count += 1;
-                        }
-                        break;
-                    }
-                }
-            }
-            log::debug!(
-                "BlobDetector: Drew {} pixels for blob at bearing {}, size {:.1}m (full={})",
-                drawn_count,
-                blob.center_spoke,
-                blob.size_meters,
-                paint_all
-            );
-        }
     }
 
     /// Get spokes that are ready to be sent (no active blobs touch them)

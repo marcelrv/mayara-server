@@ -214,8 +214,6 @@ pub struct Legend {
     pub pixels: Vec<Lookup>,
     /// Color for static background in Static ARPA mode (light grey)
     pub static_background: Option<u8>,
-    /// Color for blob contours (light blue) - used for detected targets
-    pub blob_contour: Option<u8>,
 }
 
 /// A geographic position expressed in degrees latitude and longitude.
@@ -827,12 +825,11 @@ fn default_legend(targets: &TargetMode, doppler: bool, pixel_values: u8) -> Lege
         medium_return: 0,
         low_return: 0,
         static_background: None,
-        blob_contour: None,
     };
 
     // Calculate extra colors needed for special purposes
     let arpa_extra_colors: u8 = if *targets == TargetMode::Arpa {
-        2 // static_background, blob_contour
+        1 // static_background
     } else {
         0
     };
@@ -1009,25 +1006,25 @@ impl CommonRadar {
         let trails = TrailBuffer::new(&info);
         let spoke_message = None;
 
-        // Create blob detector if ARPA mode is enabled and we have a contour color
-        let blob_detector = info.legend.blob_contour.map(|contour_color| {
+        // Create blob detector if ARPA mode is enabled
+        let blob_detector = if info.targets == TargetMode::Arpa {
             log::info!(
-                "{}: BlobDetector created with contour_color={}, threshold={}, spokes={}",
+                "{}: BlobDetector created with threshold={}, spokes={}",
                 key,
-                contour_color,
                 info.legend.medium_return,
                 info.spokes_per_revolution
             );
             let mut detector = BlobDetector::new(
                 info.spokes_per_revolution,
-                contour_color,
                 info.legend.medium_return,
             );
             // Initialize guard zones from current control values
             detector.set_guard_zone_1(info.controls.guard_zone(&ControlId::GuardZone1));
             detector.set_guard_zone_2(info.controls.guard_zone(&ControlId::GuardZone2));
-            detector
-        });
+            Some(detector)
+        } else {
+            None
+        };
 
         // Initialize exclusion zones from control values (stationary only)
         let exclusion_zones = [
@@ -1383,8 +1380,6 @@ impl CommonRadar {
                         }
                     }
 
-                    // Draw contours on completed valid-sized blobs
-                    detector.draw_contours(&completed_blobs);
                 }
 
                 // Get ready spokes (those not touched by any active blob)
