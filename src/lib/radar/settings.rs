@@ -921,13 +921,14 @@ impl SharedControls {
                     return self.send_to_command_handler(cv, reply_tx);
                 }
 
-                // Handle rect controls specially - they have north/south/east/west in meters
+                // Handle rect controls specially - they have corner-based coordinates
                 if c.item.data_type == ControlDataType::Rect {
-                    let north = cv.north.unwrap_or(0.0);
-                    let south = cv.south.unwrap_or(0.0);
-                    let east = cv.east.unwrap_or(0.0);
-                    let west = cv.west.unwrap_or(0.0);
-                    self.set_rect(&cv.id, north, south, east, west, cv.enabled)
+                    let x1 = cv.x1.unwrap_or(0.0);
+                    let y1 = cv.y1.unwrap_or(0.0);
+                    let x2 = cv.x2.unwrap_or(0.0);
+                    let y2 = cv.y2.unwrap_or(0.0);
+                    let width = cv.width.unwrap_or(0.0);
+                    self.set_rect(&cv.id, x1, y1, x2, y2, width, cv.enabled)
                         .map_err(|e| RadarError::ControlError(e))?;
                     // Broadcast the update to the radar so exclusion mask gets updated
                     return self.send_to_command_handler(cv, reply_tx);
@@ -1405,21 +1406,22 @@ impl SharedControls {
         }
     }
 
-    /// Set a rectangular exclusion zone with north/south/east/west bounds in meters
+    /// Set a rectangular exclusion zone with corner-based coordinates
     pub fn set_rect(
         &self,
         control_id: &ControlId,
-        north: f64,
-        south: f64,
-        east: f64,
-        west: f64,
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        width: f64,
         enabled: Option<bool>,
     ) -> Result<Option<()>, ControlError> {
         let control = {
             let mut locked = self.controls.write().unwrap();
             if let Some(control) = locked.controls.get_mut(control_id) {
                 Ok(control
-                    .set_rect(north, south, east, west, enabled)?
+                    .set_rect(x1, y1, x2, y2, width, enabled)?
                     .map(|_| control.clone()))
             } else {
                 Err(ControlError::NotSupported(*control_id))
@@ -1571,10 +1573,11 @@ impl SharedControls {
     pub fn exclusion_rect(&self, control_id: &ControlId) -> Option<crate::config::ExclusionRect> {
         self.get(control_id).and_then(|c| {
             Some(crate::config::ExclusionRect {
-                north: c.north?,
-                south: c.south?,
-                east: c.east?,
-                west: c.west?,
+                x1: c.x1?,
+                y1: c.y1?,
+                x2: c.x2?,
+                y2: c.y2?,
+                width: c.width?,
                 enabled: c.enabled.unwrap_or(false),
             })
         })
@@ -1583,10 +1586,11 @@ impl SharedControls {
     pub fn set_exclusion_rect(&self, control_id: &ControlId, rect: &crate::config::ExclusionRect) {
         let mut locked = self.controls.write().unwrap();
         if let Some(control) = locked.controls.get_mut(control_id) {
-            control.north = Some(rect.north);
-            control.south = Some(rect.south);
-            control.east = Some(rect.east);
-            control.west = Some(rect.west);
+            control.x1 = Some(rect.x1);
+            control.y1 = Some(rect.y1);
+            control.x2 = Some(rect.x2);
+            control.y2 = Some(rect.y2);
+            control.width = Some(rect.width);
             control.enabled = Some(rect.enabled);
         }
     }
@@ -1662,15 +1666,17 @@ pub struct ControlValue {
     pub allowed: Option<bool>,
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    // Rectangular exclusion zone fields (meters from radar position)
+    // Rectangular exclusion zone fields (corner-based, meters from radar position)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub north: Option<f64>,
+    pub x1: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub south: Option<f64>,
+    pub y1: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub east: Option<f64>,
+    pub x2: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub west: Option<f64>,
+    pub y2: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
 }
 
 impl ControlValue {
@@ -1687,10 +1693,11 @@ impl ControlValue {
             enabled: None,
             allowed: None,
             error: None,
-            north: None,
-            south: None,
-            east: None,
-            west: None,
+            x1: None,
+            y1: None,
+            x2: None,
+            y2: None,
+            width: None,
         }
     }
 
@@ -1707,10 +1714,11 @@ impl ControlValue {
             enabled: b.enabled,
             allowed: b.allowed,
             error: b.error,
-            north: b.north,
-            south: b.south,
-            east: b.east,
-            west: b.west,
+            x1: b.x1,
+            y1: b.y1,
+            x2: b.x2,
+            y2: b.y2,
+            width: b.width,
         }
     }
 
@@ -1727,10 +1735,11 @@ impl ControlValue {
             enabled: control.enabled,
             allowed: control.allowed,
             error,
-            north: control.north,
-            south: control.south,
-            east: control.east,
-            west: control.west,
+            x1: control.x1,
+            y1: control.y1,
+            x2: control.x2,
+            y2: control.y2,
+            width: control.width,
         }
     }
 
@@ -1853,22 +1862,26 @@ pub struct RadarControlValue {
     /// Error message if the control command failed (read-only)
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// North offset for rectangular exclusion zones (meters)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(example = 500.0)]
-    pub north: Option<f64>,
-    /// South offset for rectangular exclusion zones (meters)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(example = 200.0)]
-    pub south: Option<f64>,
-    /// East offset for rectangular exclusion zones (meters)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(example = 300.0)]
-    pub east: Option<f64>,
-    /// West offset for rectangular exclusion zones (meters)
+    /// First corner X for rectangular exclusion zones (meters from radar, positive = east)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = 100.0)]
-    pub west: Option<f64>,
+    pub x1: Option<f64>,
+    /// First corner Y for rectangular exclusion zones (meters from radar, positive = north)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 200.0)]
+    pub y1: Option<f64>,
+    /// Second corner X for rectangular exclusion zones (meters from radar, positive = east)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 300.0)]
+    pub x2: Option<f64>,
+    /// Second corner Y for rectangular exclusion zones (meters from radar, positive = north)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 200.0)]
+    pub y2: Option<f64>,
+    /// Width of rectangular exclusion zone (perpendicular to edge, meters)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 50.0)]
+    pub width: Option<f64>,
 }
 
 impl RadarControlValue {
@@ -1887,10 +1900,11 @@ impl RadarControlValue {
             enabled: control.enabled,
             allowed: control.allowed,
             error,
-            north: control.north,
-            south: control.south,
-            east: control.east,
-            west: control.west,
+            x1: control.x1,
+            y1: control.y1,
+            x2: control.x2,
+            y2: control.y2,
+            width: control.width,
         }
     }
 
@@ -1925,10 +1939,11 @@ impl From<RadarControlValue> for ControlValue {
             enabled: rcv.enabled,
             allowed: rcv.allowed,
             error: rcv.error,
-            north: rcv.north,
-            south: rcv.south,
-            east: rcv.east,
-            west: rcv.west,
+            x1: rcv.x1,
+            y1: rcv.y1,
+            x2: rcv.x2,
+            y2: rcv.y2,
+            width: rcv.width,
         }
     }
 }
@@ -1990,22 +2005,26 @@ pub struct BareControlValue {
     /// Error message if the control change failed (read-only)
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// North offset for rectangular exclusion zones (meters)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(example = 500.0)]
-    pub north: Option<f64>,
-    /// South offset for rectangular exclusion zones (meters)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(example = 200.0)]
-    pub south: Option<f64>,
-    /// East offset for rectangular exclusion zones (meters)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(example = 300.0)]
-    pub east: Option<f64>,
-    /// West offset for rectangular exclusion zones (meters)
+    /// First corner X for rectangular exclusion zones (meters from radar, positive = east)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = 100.0)]
-    pub west: Option<f64>,
+    pub x1: Option<f64>,
+    /// First corner Y for rectangular exclusion zones (meters from radar, positive = north)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 200.0)]
+    pub y1: Option<f64>,
+    /// Second corner X for rectangular exclusion zones (meters from radar, positive = east)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 300.0)]
+    pub x2: Option<f64>,
+    /// Second corner Y for rectangular exclusion zones (meters from radar, positive = north)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 200.0)]
+    pub y2: Option<f64>,
+    /// Width of rectangular exclusion zone (perpendicular to edge, meters)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 50.0)]
+    pub width: Option<f64>,
 }
 
 impl BareControlValue {
@@ -2021,10 +2040,11 @@ impl BareControlValue {
             enabled: None,
             allowed: None,
             error: Some(error),
-            north: None,
-            south: None,
-            east: None,
-            west: None,
+            x1: None,
+            y1: None,
+            x2: None,
+            y2: None,
+            width: None,
         }
     }
 }
@@ -2041,10 +2061,11 @@ impl From<RadarControlValue> for BareControlValue {
             enabled: rcv.enabled,
             allowed: rcv.allowed,
             error: rcv.error,
-            north: rcv.north,
-            south: rcv.south,
-            east: rcv.east,
-            west: rcv.west,
+            x1: rcv.x1,
+            y1: rcv.y1,
+            x2: rcv.x2,
+            y2: rcv.y2,
+            width: rcv.width,
         }
     }
 }
@@ -2062,10 +2083,11 @@ impl From<ControlValue> for BareControlValue {
             enabled: cv.enabled,
             allowed: cv.allowed,
             error: cv.error,
-            north: cv.north,
-            south: cv.south,
-            east: cv.east,
-            west: cv.west,
+            x1: cv.x1,
+            y1: cv.y1,
+            x2: cv.x2,
+            y2: cv.y2,
+            width: cv.width,
         }
     }
 }
@@ -2423,10 +2445,11 @@ pub(crate) fn new_rect(control_id: ControlId, max_distance: f64) -> ControlBuild
         false,
     ));
     control.item.max_distance = Some(max_distance);
-    control.north = Some(0.);
-    control.south = Some(0.);
-    control.east = Some(0.);
-    control.west = Some(0.);
+    control.x1 = Some(0.);
+    control.y1 = Some(0.);
+    control.x2 = Some(0.);
+    control.y2 = Some(0.);
+    control.width = Some(0.);
     ControlBuilder {
         control,
         frozen: false,
@@ -2458,15 +2481,17 @@ pub struct Control {
     pub allowed: Option<bool>,
     #[serde(skip)]
     pub needs_refresh: bool, // True when it has been changed and client needs to know value (again)
-    // Rectangular exclusion zone fields (meters from radar position)
+    // Rectangular exclusion zone fields (corner-based, meters from radar position)
     #[serde(skip)]
-    pub north: Option<f64>,
+    pub x1: Option<f64>,
     #[serde(skip)]
-    pub south: Option<f64>,
+    pub y1: Option<f64>,
     #[serde(skip)]
-    pub east: Option<f64>,
+    pub x2: Option<f64>,
     #[serde(skip)]
-    pub west: Option<f64>,
+    pub y2: Option<f64>,
+    #[serde(skip)]
+    pub width: Option<f64>,
 }
 
 impl Control {
@@ -2484,10 +2509,11 @@ impl Control {
             description: None,
             allowed: None,
             needs_refresh: false,
-            north: None,
-            south: None,
-            east: None,
-            west: None,
+            x1: None,
+            y1: None,
+            x2: None,
+            y2: None,
+            width: None,
         }
     }
 
@@ -2902,31 +2928,34 @@ impl Control {
         }
     }
 
-    /// Set a rectangular exclusion zone with north/south/east/west bounds.
-    /// All values are in meters from the radar position.
+    /// Set a rectangular exclusion zone with corner-based coordinates.
+    /// x1,y1 and x2,y2 define one edge, width is perpendicular.
     pub fn set_rect(
         &mut self,
-        north: f64,
-        south: f64,
-        east: f64,
-        west: f64,
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        width: f64,
         enabled: Option<bool>,
     ) -> Result<Option<()>, ControlError> {
         if self.item.data_type != ControlDataType::Rect {
             return Err(ControlError::NotSupported(self.item.control_id));
         }
 
-        let changed = self.north != Some(north)
-            || self.south != Some(south)
-            || self.east != Some(east)
-            || self.west != Some(west)
+        let changed = self.x1 != Some(x1)
+            || self.y1 != Some(y1)
+            || self.x2 != Some(x2)
+            || self.y2 != Some(y2)
+            || self.width != Some(width)
             || self.enabled != enabled;
 
         if changed {
-            self.north = Some(north);
-            self.south = Some(south);
-            self.east = Some(east);
-            self.west = Some(west);
+            self.x1 = Some(x1);
+            self.y1 = Some(y1);
+            self.x2 = Some(x2);
+            self.y2 = Some(y2);
+            self.width = Some(width);
             self.enabled = enabled;
             self.needs_refresh = false;
 

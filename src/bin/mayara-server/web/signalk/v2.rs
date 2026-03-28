@@ -549,7 +549,17 @@ async fn set_control_value(
     // Check if this control should trigger persistence save
     let needs_persistence = matches!(
         control_value.id,
-        ControlId::GuardZone1 | ControlId::GuardZone2 | ControlId::UserName
+        ControlId::GuardZone1
+            | ControlId::GuardZone2
+            | ControlId::ExclusionZone1
+            | ControlId::ExclusionZone2
+            | ControlId::ExclusionZone3
+            | ControlId::ExclusionZone4
+            | ControlId::ExclusionRect1
+            | ControlId::ExclusionRect2
+            | ControlId::ExclusionRect3
+            | ControlId::ExclusionRect4
+            | ControlId::UserName
     );
 
     // Send the control request

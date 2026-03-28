@@ -188,8 +188,6 @@ impl LandArea {
 
 /// Cached local coordinates for efficient per-spoke lookups
 pub struct LocalCache {
-    /// Meters per degree longitude at boat latitude
-    meters_per_degree_lon: f64,
     /// Land center in local coords
     land_center: (f64, f64),
     /// Target positions in local coords
@@ -356,7 +354,6 @@ impl EmulatorWorld {
         };
 
         self.cache = Some(LocalCache {
-            meters_per_degree_lon,
             land_center: to_local(&self.land.center),
             targets: self.targets.iter().map(|t| to_local(&t.position)).collect(),
             crossing_targets: self.crossing_targets.iter().map(|t| to_local(&t.position)).collect(),

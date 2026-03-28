@@ -42,7 +42,7 @@ import {
   isStandaloneMode,
   isPlaybackRadar,
 } from "./api.js";
-import { setZoneEditMode, setSectorEditMode, updateZoneForEditing } from "./viewer.js";
+import { setZoneEditMode, setZoneCreateMode, setRectCreateMode, setSectorEditMode, updateZoneForEditing, updateRectForEditing } from "./viewer.js";
 import { SpokeProcessingMode } from "./spoke_processor.js";
 
 const { div, label, input, button, select, option, span } = van.tags;
@@ -627,6 +627,28 @@ const ZoneValue = (id, name, control) => {
     updateEditFields(newZone);
   }
 
+  function onZoneCreated(zone) {
+    // Called when user finishes drawing a zone via click-drag
+    updateEditFields(zone);
+    // Exit create mode, enter regular edit mode for adjustments
+    setZoneCreateMode(id, false);
+    setZoneEditMode(id, true, onDragEnd, onDragMove);
+    // Enable the zone checkbox since user drew it
+    document.getElementById(`${prefix}_edit_enabled`).checked = true;
+  }
+
+  function startDrawMode() {
+    // First ensure we're in edit mode (shows the edit section)
+    const container = document.getElementById(`myr_${id}`);
+    const editSection = container.querySelector(".myr_zone_edit");
+    if (editSection.style.display === "none") {
+      enterEditMode();
+    }
+    // Disable regular edit handles, enable create mode
+    setZoneEditMode(id, false);
+    setZoneCreateMode(id, true, onZoneCreated);
+  }
+
   function updateZonePreview() {
     // Called when edit fields change - update the zone preview on the viewer
     const startDeg = parseInt(document.getElementById(`${prefix}_edit_start_angle`)?.value) || 0;
@@ -841,6 +863,15 @@ const ZoneValue = (id, name, control) => {
         button(
           {
             type: "button",
+            class: "myr_zone_draw_btn",
+            onclick: startDrawMode,
+            title: "Click and drag on radar to draw zone",
+          },
+          "Draw"
+        ),
+        button(
+          {
+            type: "button",
             class: "myr_zone_cancel_btn",
             onclick: exitEditMode,
           },
@@ -883,6 +914,308 @@ function updateZoneUI(id, control, cv) {
   // Hide display section when not enabled
   const container = document.getElementById(`myr_${id}`);
   const displaySection = container?.querySelector(".myr_zone_display");
+  if (displaySection) {
+    displaySection.style.display = cv.enabled ? "block" : "none";
+  }
+}
+
+/**
+ * Rect control - displays corner-based rectangular exclusion zones
+ * Two corners (x1,y1), (x2,y2) define one edge, width is perpendicular
+ * Shows read-only summary with Edit button; edit mode shows all fields with Cancel/Save
+ */
+const RectValue = (id, name, control) => {
+  const prefix = `myr_control_${id}`;
+  const maxDist = control.maxValue ?? 100000;
+
+  function updateEditFields(rect) {
+    const x1El = document.getElementById(`${prefix}_edit_x1`);
+    const y1El = document.getElementById(`${prefix}_edit_y1`);
+    const x2El = document.getElementById(`${prefix}_edit_x2`);
+    const y2El = document.getElementById(`${prefix}_edit_y2`);
+    const widthEl = document.getElementById(`${prefix}_edit_width`);
+
+    if (x1El) x1El.value = Math.round(rect.x1 ?? 0);
+    if (y1El) y1El.value = Math.round(rect.y1 ?? 0);
+    if (x2El) x2El.value = Math.round(rect.x2 ?? 0);
+    if (y2El) y2El.value = Math.round(rect.y2 ?? 0);
+    if (widthEl) widthEl.value = Math.round(rect.width ?? 0);
+  }
+
+  function onRectCreated(rect) {
+    updateEditFields(rect);
+    setRectCreateMode(id, false);
+    document.getElementById(`${prefix}_edit_enabled`).checked = true;
+  }
+
+  function startDrawMode() {
+    const container = document.getElementById(`myr_${id}`);
+    const editSection = container.querySelector(".myr_rect_edit");
+    if (editSection.style.display === "none") {
+      enterEditMode();
+    }
+    setRectCreateMode(id, true, onRectCreated);
+  }
+
+  function updateRectPreview() {
+    const x1 = parseFloat(document.getElementById(`${prefix}_edit_x1`)?.value) || 0;
+    const y1 = parseFloat(document.getElementById(`${prefix}_edit_y1`)?.value) || 0;
+    const x2 = parseFloat(document.getElementById(`${prefix}_edit_x2`)?.value) || 0;
+    const y2 = parseFloat(document.getElementById(`${prefix}_edit_y2`)?.value) || 0;
+    const width = parseFloat(document.getElementById(`${prefix}_edit_width`)?.value) || 0;
+
+    updateRectForEditing(id, {
+      x1,
+      y1,
+      x2,
+      y2,
+      width,
+      enabled: true,
+    });
+  }
+
+  function enterEditMode() {
+    const container = document.getElementById(`myr_${id}`);
+    const displaySection = container.querySelector(".myr_rect_display");
+    const editSection = container.querySelector(".myr_rect_edit");
+
+    const cv = myr_control_values[id] || {};
+    document.getElementById(`${prefix}_edit_x1`).value = Math.round(cv.x1 ?? 0);
+    document.getElementById(`${prefix}_edit_y1`).value = Math.round(cv.y1 ?? 0);
+    document.getElementById(`${prefix}_edit_x2`).value = Math.round(cv.x2 ?? 0);
+    document.getElementById(`${prefix}_edit_y2`).value = Math.round(cv.y2 ?? 0);
+    document.getElementById(`${prefix}_edit_width`).value = Math.round(cv.width ?? 0);
+    document.getElementById(`${prefix}_edit_enabled`).checked = cv.enabled ?? false;
+
+    displaySection.style.display = "none";
+    editSection.style.display = "block";
+
+    updateRectPreview();
+  }
+
+  function exitEditMode() {
+    const container = document.getElementById(`myr_${id}`);
+    const displaySection = container.querySelector(".myr_rect_display");
+    const editSection = container.querySelector(".myr_rect_edit");
+
+    displaySection.style.display = "block";
+    editSection.style.display = "none";
+
+    setRectCreateMode(id, false);
+
+    const cv = myr_control_values[id] || {};
+    if (cv.enabled) {
+      updateRectForEditing(id, {
+        x1: cv.x1 ?? 0,
+        y1: cv.y1 ?? 0,
+        x2: cv.x2 ?? 0,
+        y2: cv.y2 ?? 0,
+        width: cv.width ?? 0,
+        enabled: true,
+      });
+    } else {
+      updateRectForEditing(id, null);
+    }
+  }
+
+  function saveRect() {
+    const x1 = parseFloat(document.getElementById(`${prefix}_edit_x1`)?.value) || 0;
+    const y1 = parseFloat(document.getElementById(`${prefix}_edit_y1`)?.value) || 0;
+    const x2 = parseFloat(document.getElementById(`${prefix}_edit_x2`)?.value) || 0;
+    const y2 = parseFloat(document.getElementById(`${prefix}_edit_y2`)?.value) || 0;
+    const width = parseFloat(document.getElementById(`${prefix}_edit_width`)?.value) || 0;
+    const enabledVal = document.getElementById(`${prefix}_edit_enabled`)?.checked ?? false;
+
+    myr_control_values[id] = {
+      ...myr_control_values[id],
+      x1,
+      y1,
+      x2,
+      y2,
+      width,
+      enabled: enabledVal,
+    };
+
+    apiSetControl(radarId, id, {
+      x1,
+      y1,
+      x2,
+      y2,
+      width,
+      enabled: enabledVal,
+    });
+
+    exitEditMode();
+  }
+
+  return div(
+    { class: "myr_control myr_rect_control", id: `myr_${id}` },
+    input({ type: "hidden", id: `${control_prefix}${id}` }),
+    div(
+      { class: "myr_control_header" },
+      span({ class: "myr_control_label" }, name),
+      button(
+        {
+          type: "button",
+          class: "myr_zone_edit_btn",
+          onclick: enterEditMode,
+        },
+        "Edit"
+      )
+    ),
+    div(
+      { class: "myr_rect_display", onclick: enterEditMode },
+      div(
+        { class: "myr_zone_summary" },
+        div(
+          { class: "myr_zone_summary_row" },
+          span({ class: "myr_zone_summary_label" }, "Edge: "),
+          span({ id: `${prefix}_display_edge` }, "(0,0) - (0,0)")
+        ),
+        div(
+          { class: "myr_zone_summary_row" },
+          span({ class: "myr_zone_summary_label" }, "Width: "),
+          span({ id: `${prefix}_display_width` }, "0 m")
+        )
+      )
+    ),
+    div(
+      { class: "myr_rect_edit", style: "display: none;" },
+      div(
+        { class: "myr_zone_row" },
+        div(
+          { class: "myr_zone_field" },
+          label({ for: `${prefix}_edit_x1` }, "X1 (m)"),
+          input({
+            type: "number",
+            id: `${prefix}_edit_x1`,
+            min: -maxDist,
+            max: maxDist,
+            value: 0,
+            oninput: updateRectPreview,
+          })
+        ),
+        div(
+          { class: "myr_zone_field" },
+          label({ for: `${prefix}_edit_y1` }, "Y1 (m)"),
+          input({
+            type: "number",
+            id: `${prefix}_edit_y1`,
+            min: -maxDist,
+            max: maxDist,
+            value: 0,
+            oninput: updateRectPreview,
+          })
+        )
+      ),
+      div(
+        { class: "myr_zone_row" },
+        div(
+          { class: "myr_zone_field" },
+          label({ for: `${prefix}_edit_x2` }, "X2 (m)"),
+          input({
+            type: "number",
+            id: `${prefix}_edit_x2`,
+            min: -maxDist,
+            max: maxDist,
+            value: 0,
+            oninput: updateRectPreview,
+          })
+        ),
+        div(
+          { class: "myr_zone_field" },
+          label({ for: `${prefix}_edit_y2` }, "Y2 (m)"),
+          input({
+            type: "number",
+            id: `${prefix}_edit_y2`,
+            min: -maxDist,
+            max: maxDist,
+            value: 0,
+            oninput: updateRectPreview,
+          })
+        )
+      ),
+      div(
+        { class: "myr_zone_row" },
+        div(
+          { class: "myr_zone_field myr_zone_field_wide" },
+          label({ for: `${prefix}_edit_width` }, "Width (m)"),
+          input({
+            type: "number",
+            id: `${prefix}_edit_width`,
+            min: 0,
+            max: maxDist,
+            value: 0,
+            oninput: updateRectPreview,
+          })
+        )
+      ),
+      div(
+        { class: "myr_zone_enabled" },
+        label(
+          { class: "myr_checkbox_label" },
+          input({
+            type: "checkbox",
+            id: `${prefix}_edit_enabled`,
+          }),
+          " Enabled"
+        )
+      ),
+      div(
+        { class: "myr_zone_buttons" },
+        button(
+          {
+            type: "button",
+            class: "myr_zone_draw_btn",
+            onclick: startDrawMode,
+            title: "Click 3 times on radar: corner 1, corner 2, then width",
+          },
+          "Draw"
+        ),
+        button(
+          {
+            type: "button",
+            class: "myr_zone_cancel_btn",
+            onclick: exitEditMode,
+          },
+          "Cancel"
+        ),
+        button(
+          {
+            type: "button",
+            class: "myr_zone_save_btn",
+            onclick: saveRect,
+          },
+          "Save"
+        )
+      )
+    )
+  );
+};
+
+/**
+ * Update rect control UI from server state (read-only display)
+ */
+function updateRectUI(id, control, cv) {
+  const prefix = `myr_control_${id}`;
+
+  const edgeDisplay = document.getElementById(`${prefix}_display_edge`);
+  const widthDisplay = document.getElementById(`${prefix}_display_width`);
+
+  if (edgeDisplay) {
+    const x1 = Math.round(cv.x1 ?? 0);
+    const y1 = Math.round(cv.y1 ?? 0);
+    const x2 = Math.round(cv.x2 ?? 0);
+    const y2 = Math.round(cv.y2 ?? 0);
+    edgeDisplay.textContent = `(${x1},${y1}) - (${x2},${y2})`;
+  }
+  if (widthDisplay) {
+    const width = Math.round(cv.width ?? 0);
+    widthDisplay.textContent = `${width} m`;
+  }
+
+  const container = document.getElementById(`myr_${id}`);
+  const displaySection = container?.querySelector(".myr_rect_display");
   if (displaySection) {
     displaySection.style.display = cv.enabled ? "block" : "none";
   }
@@ -982,6 +1315,8 @@ function buildSingleControl(k, v) {
     return SectorValue(k, v.name, v);
   } else if (v.dataType === "zone") {
     return ZoneValue(k, v.name, v);
+  } else if (v.dataType === "rect") {
+    return RectValue(k, v.name, v);
   } else if ("validValues" in v && "descriptions" in v) {
     return SelectValue(k, v.name, v.validValues, v.descriptions);
   } else if (
@@ -1042,6 +1377,8 @@ function setControlValue(cv) {
       updateSectorUI(cv.id, control, cv);
     } else if (control && control.dataType === "zone") {
       updateZoneUI(cv.id, control, cv);
+    } else if (control && control.dataType === "rect") {
+      updateRectUI(cv.id, control, cv);
     } else {
       // Update numeric display
       let n = document.getElementById(control_prefix + cv.id + "_display");

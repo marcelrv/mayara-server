@@ -121,6 +121,24 @@ class PPI {
     this.onZoneDragEnd = null;
     this.onZoneDragMove = null;
 
+    // Zone create mode state (click-drag to define zone)
+    this.creatingZoneIndex = null;
+    this.creatingZoneType = null; // 'guard' or 'exclusion'
+    this.creatingRectIndex = null;
+    this.createDragStart = null;
+    this.onZoneCreated = null;
+    this.onRectCreated = null;
+
+    // 3-click rect creation state
+    // clickCount: 0=waiting for click1, 1=waiting for click2, 2=waiting for click3
+    this.rectCreateClickCount = 0;
+    this.rectCreateCorner1 = null; // {x, y} first corner
+    this.rectCreateCorner2 = null; // {x, y} second corner (defines edge with corner1)
+
+    // Exclusion zones and rects for stationary installations
+    this.exclusionZones = [null, null, null, null];
+    this.exclusionRects = [null, null, null, null];
+
     // Sector edit mode state
     this.editingSectorIndex = null;
     this.onSectorDragEnd = null;
@@ -300,6 +318,20 @@ class PPI {
     }
   }
 
+  setExclusionZone(index, zone) {
+    if (index >= 0 && index < 4) {
+      this.exclusionZones[index] = zone;
+      this.redrawCanvas();
+    }
+  }
+
+  setExclusionRect(index, rect) {
+    if (index >= 0 && index < 4) {
+      this.exclusionRects[index] = rect;
+      this.redrawCanvas();
+    }
+  }
+
   setNoTransmitSector(index, sector) {
     if (index >= 0 && index < 4) {
       this.noTransmitSectors[index] = sector;
@@ -323,6 +355,68 @@ class PPI {
     this.onSectorDragEnd = onDragEnd;
     this.dragState = null;
     this.hoveredHandle = null;
+
+    this.#updatePointerEvents();
+    this.redrawCanvas();
+  }
+
+  /**
+   * Enter zone creation mode - click-drag to define a new zone
+   * @param {number} index - Zone index (0-3 for guard zones, or exclusion zone index)
+   * @param {function} onCreated - Callback (index, zone) when zone is created
+   * @param {string} zoneType - 'guard' or 'exclusion' (default: 'guard')
+   */
+  setCreatingZone(index, onCreated = null, zoneType = "guard") {
+    this.creatingZoneIndex = index;
+    this.creatingZoneType = zoneType;
+    this.creatingRectIndex = null;
+    this.editingZoneIndex = null;
+    this.editingSectorIndex = null;
+    this.onZoneCreated = onCreated;
+    this.dragState = null;
+    this.createDragStart = null;
+
+    this.#updatePointerEvents();
+    this.redrawCanvas();
+  }
+
+  /**
+   * Enter rectangle creation mode - 3 clicks to define a rectangle
+   * Click 1: first corner, Click 2: second corner (defines edge), Click 3: width
+   * @param {number} index - Rectangle index
+   * @param {function} onCreated - Callback (index, rect) when rect is created
+   */
+  setCreatingRect(index, onCreated = null) {
+    this.creatingRectIndex = index;
+    this.creatingZoneIndex = null;
+    this.creatingZoneType = null;
+    this.editingZoneIndex = null;
+    this.editingSectorIndex = null;
+    this.onRectCreated = onCreated;
+    this.dragState = null;
+    this.createDragStart = null;
+    // Reset 3-click state
+    this.rectCreateClickCount = 0;
+    this.rectCreateCorner1 = null;
+    this.rectCreateCorner2 = null;
+
+    this.#updatePointerEvents();
+    this.redrawCanvas();
+  }
+
+  /**
+   * Exit creation mode without creating anything
+   */
+  cancelCreating() {
+    this.creatingZoneIndex = null;
+    this.creatingZoneType = null;
+    this.creatingRectIndex = null;
+    this.createDragStart = null;
+    this.dragState = null;
+    // Reset 3-click state
+    this.rectCreateClickCount = 0;
+    this.rectCreateCorner1 = null;
+    this.rectCreateCorner2 = null;
 
     this.#updatePointerEvents();
     this.redrawCanvas();
@@ -663,6 +757,17 @@ class PPI {
     this.#drawGuardZone(ctx, this.guardZones[0], "rgba(144, 238, 144, 0.25)", "rgba(0, 128, 0, 0.6)");
     this.#drawGuardZone(ctx, this.guardZones[1], "rgba(173, 216, 230, 0.25)", "rgba(0, 0, 255, 0.6)");
 
+    // Draw exclusion zones (greyish color scheme)
+    this.#drawGuardZone(ctx, this.exclusionZones[0], "rgba(180, 180, 180, 0.25)", "rgba(120, 120, 120, 0.6)");
+    this.#drawGuardZone(ctx, this.exclusionZones[1], "rgba(180, 180, 180, 0.25)", "rgba(120, 120, 120, 0.6)");
+    this.#drawGuardZone(ctx, this.exclusionZones[2], "rgba(180, 180, 180, 0.25)", "rgba(120, 120, 120, 0.6)");
+    this.#drawGuardZone(ctx, this.exclusionZones[3], "rgba(180, 180, 180, 0.25)", "rgba(120, 120, 120, 0.6)");
+
+    // Draw exclusion rectangles
+    for (const rect of this.exclusionRects) {
+      this.#drawExclusionRect(ctx, rect);
+    }
+
     // Draw drag handles if editing
     if (this.editingZoneIndex !== null) {
       const zone = this.guardZones[this.editingZoneIndex];
@@ -809,6 +914,59 @@ class PPI {
     ctx.fillStyle = fillColor;
     ctx.fill();
     ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  #drawExclusionRect(ctx, rect) {
+    if (!rect || !rect.enabled) return;
+    if (!this.range || this.range <= 0) return;
+
+    const pixelsPerMeter = this.beam_length / this.range;
+
+    // Corner-based rectangle: (x1,y1) to (x2,y2) defines one edge, width is perpendicular
+    const dx = rect.x2 - rect.x1;
+    const dy = rect.y2 - rect.y1;
+    const edgeLen = Math.sqrt(dx * dx + dy * dy);
+    if (edgeLen < 0.001 || (rect.width ?? 0) < 0.001) return;
+
+    // Perpendicular unit vector (rotated 90 degrees clockwise)
+    const perpX = dy / edgeLen;
+    const perpY = -dx / edgeLen;
+
+    // 4 corners of the rectangle in world coordinates
+    const corners = [
+      { x: rect.x1, y: rect.y1 },
+      { x: rect.x2, y: rect.y2 },
+      { x: rect.x2 + perpX * rect.width, y: rect.y2 + perpY * rect.width },
+      { x: rect.x1 + perpX * rect.width, y: rect.y1 + perpY * rect.width },
+    ];
+
+    // Transform to canvas coordinates with heading rotation
+    const cos_h = Math.cos(this.headingRotation);
+    const sin_h = Math.sin(this.headingRotation);
+
+    const canvasCorners = corners.map(c => {
+      // Rotate by heading
+      const rx = c.x * cos_h - c.y * sin_h;
+      const ry = c.x * sin_h + c.y * cos_h;
+      // Scale and translate to canvas
+      return {
+        x: this.center_x + rx * pixelsPerMeter,
+        y: this.center_y - ry * pixelsPerMeter,  // y is inverted in canvas
+      };
+    });
+
+    ctx.beginPath();
+    ctx.moveTo(canvasCorners[0].x, canvasCorners[0].y);
+    for (let i = 1; i < canvasCorners.length; i++) {
+      ctx.lineTo(canvasCorners[i].x, canvasCorners[i].y);
+    }
+    ctx.closePath();
+
+    ctx.fillStyle = "rgba(180, 180, 180, 0.25)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(120, 120, 120, 0.6)";
     ctx.lineWidth = 1;
     ctx.stroke();
   }
@@ -1214,12 +1372,17 @@ class PPI {
   // ============================================================
 
   #updatePointerEvents() {
-    const isEditing = this.editingZoneIndex !== null || this.editingSectorIndex !== null;
-    const needsPointerEvents = isEditing || this.acquireTargetMode;
+    const isCreating =
+      this.creatingZoneIndex !== null || this.creatingRectIndex !== null;
+    const isEditing =
+      this.editingZoneIndex !== null || this.editingSectorIndex !== null;
+    const needsPointerEvents = isCreating || isEditing || this.acquireTargetMode;
 
     if (needsPointerEvents && this.overlay_dom) {
       this.overlay_dom.style.pointerEvents = "auto";
-      this.overlay_dom.style.cursor = this.acquireTargetMode ? "crosshair" : "default";
+      // Use crosshair for create mode and acquire mode
+      this.overlay_dom.style.cursor =
+        isCreating || this.acquireTargetMode ? "crosshair" : "default";
       this.#setupDragHandlers();
     } else if (this.overlay_dom) {
       this.overlay_dom.style.pointerEvents = "none";
@@ -1392,6 +1555,49 @@ class PPI {
     // Record click start position for acquire mode
     this._clickStart = { x: coords.x, y: coords.y };
 
+    // If in zone create mode (drag-based), start drag
+    if (this.creatingZoneIndex !== null) {
+      const radarCoords = this.#pixelToRadarCoords(coords.x, coords.y);
+      this.createDragStart = radarCoords;
+      this.dragState = {
+        type: "createZone",
+        startX: coords.x,
+        startY: coords.y,
+      };
+      this.#initializeCreatingZone(radarCoords);
+      event.preventDefault();
+      return;
+    }
+
+    // If in rect create mode (3-click based), handle click
+    // This is click-based, not drag-based, so we don't use dragState
+    if (this.creatingRectIndex !== null) {
+      const radarCoords = this.#pixelToRadarCoords(coords.x, coords.y);
+      const p = this.#polarToCartesian(radarCoords.angle, radarCoords.distance);
+
+      if (this.rectCreateClickCount === 0) {
+        // First click - initialize rect with first corner
+        this.#initializeCreatingRect(radarCoords);
+        // rectCreateClickCount is now 1, mouse move will update x2/y2
+      } else if (this.rectCreateClickCount === 1) {
+        // Second click - lock second corner, start width definition
+        const rect = this.exclusionRects[this.creatingRectIndex];
+        if (rect) {
+          rect.x2 = p.x;
+          rect.y2 = p.y;
+          this.rectCreateCorner2 = { x: p.x, y: p.y };
+          this.rectCreateClickCount = 2;
+          // Mouse move will now update width
+        }
+      } else if (this.rectCreateClickCount === 2) {
+        // Third click - finalize width and complete
+        this.#finalizeRectCreation();
+      }
+      event.preventDefault();
+      this.redrawCanvas();
+      return;
+    }
+
     const hit = this.#hitTestHandles(coords.x, coords.y);
 
     if (hit) {
@@ -1422,13 +1628,24 @@ class PPI {
   #handleMouseMove(event) {
     const coords = this.#getCanvasCoords(event);
 
+    // Handle 3-click rect creation: track mouse regardless of dragState
+    if (this.creatingRectIndex !== null && this.rectCreateClickCount > 0) {
+      this.#updateRectFromCreateDrag(coords.x, coords.y);
+      event.preventDefault();
+      return;
+    }
+
     if (this.dragState) {
-      if (this.dragState.type === "zone") {
+      if (this.dragState.type === "createZone") {
+        this.#updateZoneFromCreateDrag(coords.x, coords.y);
+        event.preventDefault();
+      } else if (this.dragState.type === "zone") {
         this.#updateZoneFromDrag(coords.x, coords.y);
+        event.preventDefault();
       } else if (this.dragState.type === "sector") {
         this.#updateSectorFromDrag(coords.x, coords.y);
+        event.preventDefault();
       }
-      event.preventDefault();
     } else {
       const hit = this.#hitTestHandles(coords.x, coords.y);
       const newHovered = hit ? hit.handle : null;
@@ -1441,8 +1658,17 @@ class PPI {
   }
 
   #handleMouseUp(event) {
+    // For 3-click rect creation, don't do anything special on mouseup
+    // The clicks are handled in mousedown, not as drag operations
+    if (this.creatingRectIndex !== null && this.rectCreateClickCount > 0) {
+      this._clickStart = null;
+      return;
+    }
+
     if (this.dragState) {
-      if (this.dragState.type === "zone") {
+      if (this.dragState.type === "createZone") {
+        this.#finalizeZoneCreation();
+      } else if (this.dragState.type === "zone") {
         const zoneIndex = this.editingZoneIndex;
         const newZone = this.guardZones[zoneIndex];
         if (this.onZoneDragEnd && newZone) {
@@ -1609,6 +1835,152 @@ class PPI {
     }
 
     this.redrawCanvas();
+  }
+
+  // Zone creation via click-drag
+
+  #initializeCreatingZone(startCoords) {
+    if (this.creatingZoneIndex !== null) {
+      // Determine which array to use based on index
+      // 0-1 are guard zones, 2+ would be exclusion zones
+      const zoneArray = this.creatingZoneIndex < 2 ? this.guardZones : this.exclusionZones;
+      const arrayIndex = this.creatingZoneIndex < 2 ? this.creatingZoneIndex : this.creatingZoneIndex - 2;
+      zoneArray[arrayIndex] = {
+        startAngle: startCoords.angle,
+        endAngle: startCoords.angle,
+        startDistance: startCoords.distance,
+        endDistance: startCoords.distance,
+        enabled: true
+      };
+    }
+    this.redrawCanvas();
+  }
+
+  #initializeCreatingRect(startCoords) {
+    if (this.creatingRectIndex !== null) {
+      const p = this.#polarToCartesian(startCoords.angle, startCoords.distance);
+
+      if (this.rectCreateClickCount === 0) {
+        // First click - store first corner
+        this.rectCreateCorner1 = { x: p.x, y: p.y };
+        this.rectCreateClickCount = 1;
+        // Initialize rect - x2/y2 will track mouse until second click
+        // width starts small for visibility, will be set on third click
+        this.exclusionRects[this.creatingRectIndex] = {
+          x1: p.x,
+          y1: p.y,
+          x2: p.x,
+          y2: p.y,
+          width: 10,  // Small default width for visibility during edge definition
+          enabled: true
+        };
+      }
+    }
+    this.redrawCanvas();
+  }
+
+  #updateZoneFromCreateDrag(x, y) {
+    if (!this.createDragStart || this.creatingZoneIndex === null) return;
+
+    const endCoords = this.#pixelToRadarCoords(x, y);
+    const start = this.createDragStart;
+
+    // Determine which array to use
+    const zoneArray = this.creatingZoneIndex < 2 ? this.guardZones : this.exclusionZones;
+    const arrayIndex = this.creatingZoneIndex < 2 ? this.creatingZoneIndex : this.creatingZoneIndex - 2;
+    const zone = zoneArray[arrayIndex];
+    if (!zone) return;
+
+    // Normalize angles to [-PI, PI] and assign min/max
+    let a1 = this.#normalizeAngle(start.angle);
+    let a2 = this.#normalizeAngle(endCoords.angle);
+    zone.startAngle = Math.min(a1, a2);
+    zone.endAngle = Math.max(a1, a2);
+
+    // Assign distances so startDistance < endDistance
+    zone.startDistance = Math.max(0, Math.min(start.distance, endCoords.distance));
+    zone.endDistance = Math.max(start.distance, endCoords.distance);
+
+    // Enforce minimum size (50m)
+    if (zone.endDistance - zone.startDistance < 50) {
+      zone.endDistance = zone.startDistance + 50;
+    }
+
+    this.redrawCanvas();
+  }
+
+  #updateRectFromCreateDrag(x, y) {
+    if (this.creatingRectIndex === null) return;
+
+    const currentCoords = this.#pixelToRadarCoords(x, y);
+    const p = this.#polarToCartesian(currentCoords.angle, currentCoords.distance);
+
+    const rect = this.exclusionRects[this.creatingRectIndex];
+    if (!rect) return;
+
+    if (this.rectCreateClickCount === 1) {
+      // After first click, show edge being defined
+      rect.x2 = p.x;
+      rect.y2 = p.y;
+      rect.width = 10; // Small default width for visibility
+    } else if (this.rectCreateClickCount === 2) {
+      // After second click, adjust width based on perpendicular distance
+      const dx = rect.x2 - rect.x1;
+      const dy = rect.y2 - rect.y1;
+      const edgeLen = Math.sqrt(dx * dx + dy * dy);
+      if (edgeLen > 0.001) {
+        // Calculate perpendicular distance from cursor to the edge line
+        // Perpendicular unit vector (rotated 90 degrees clockwise)
+        const perpX = dy / edgeLen;
+        const perpY = -dx / edgeLen;
+        // Vector from corner1 to current point
+        const toP = { x: p.x - rect.x1, y: p.y - rect.y1 };
+        // Project onto perpendicular to get width
+        rect.width = Math.abs(toP.x * perpX + toP.y * perpY);
+        // Minimum width
+        if (rect.width < 5) rect.width = 5;
+      }
+    }
+
+    this.redrawCanvas();
+  }
+
+  #normalizeAngle(angle) {
+    while (angle > Math.PI) angle -= 2 * Math.PI;
+    while (angle < -Math.PI) angle += 2 * Math.PI;
+    return angle;
+  }
+
+  #polarToCartesian(angle, distance) {
+    return {
+      x: distance * Math.sin(angle),  // East is +X
+      y: distance * Math.cos(angle)   // North is +Y
+    };
+  }
+
+  #finalizeZoneCreation() {
+    if (this.creatingZoneIndex !== null && this.onZoneCreated) {
+      const zoneArray = this.creatingZoneIndex < 2 ? this.guardZones : this.exclusionZones;
+      const arrayIndex = this.creatingZoneIndex < 2 ? this.creatingZoneIndex : this.creatingZoneIndex - 2;
+      this.onZoneCreated(this.creatingZoneIndex, zoneArray[arrayIndex]);
+    }
+    this.dragState = null;
+    this.createDragStart = null;
+  }
+
+  #finalizeRectCreation() {
+    if (this.creatingRectIndex !== null && this.onRectCreated) {
+      this.onRectCreated(this.creatingRectIndex, this.exclusionRects[this.creatingRectIndex]);
+    }
+    // Reset all create state
+    this.creatingRectIndex = null;
+    this.dragState = null;
+    this.createDragStart = null;
+    this.rectCreateClickCount = 0;
+    this.rectCreateCorner1 = null;
+    this.rectCreateCorner2 = null;
+    // Reset cursor
+    this.overlay_dom.style.cursor = "default";
   }
 
   #drawDragHandles(ctx, zone) {

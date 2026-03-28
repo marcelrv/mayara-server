@@ -795,6 +795,7 @@ div.myr_range_buttons {
   justify-content: flex-end;
 }
 
+.myr_zone_draw_btn,
 .myr_zone_cancel_btn,
 .myr_zone_save_btn {
   padding: 6px 16px;
@@ -804,6 +805,17 @@ div.myr_range_buttons {
   border-radius: 4px;
   cursor: pointer;
   transition: all 0.2s ease;
+}
+
+.myr_zone_draw_btn {
+  background-color: #223;
+  border-color: #448;
+  color: #88a;
+}
+
+.myr_zone_draw_btn:hover {
+  background-color: #334;
+  border-color: #66a;
 }
 
 .myr_zone_cancel_btn {
@@ -826,6 +838,26 @@ div.myr_range_buttons {
 .myr_zone_save_btn:hover {
   background-color: #343;
   border-color: #686;
+}
+
+/* Rect control (Exclusion Rectangles) - reuses zone styling */
+.myr_rect_control {
+  display: flex;
+  flex-direction: column;
+}
+
+.myr_rect_display {
+  margin-top: 4px;
+  cursor: pointer;
+}
+
+.myr_rect_display:hover {
+  background-color: rgba(68, 102, 136, 0.2);
+  border-radius: 4px;
+}
+
+.myr_rect_edit {
+  margin-top: 8px;
 }
 
 /* ============================================

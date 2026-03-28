@@ -2,8 +2,11 @@
 
 export {
   setZoneEditMode,
+  setZoneCreateMode,
+  setRectCreateMode,
   setSectorEditMode,
   updateZoneForEditing,
+  updateRectForEditing,
 };
 
 import {
@@ -964,22 +967,120 @@ function setZoneEditMode(controlId, editing, onDragEnd = null) {
 }
 
 /**
+ * Enable zone create mode - click-drag on PPI to define zone boundaries
+ * @param {string} controlId - Control ID (e.g., "guardZone1", "exclusionZone1")
+ * @param {boolean} creating - Whether to enable create mode
+ * @param {function} onCreated - Callback (zone) when zone is created
+ */
+function setZoneCreateMode(controlId, creating, onCreated = null) {
+  if (!ppi) return;
+
+  if (!creating) {
+    ppi.cancelCreating();
+    return;
+  }
+
+  let zoneIndex = null;
+  let zoneType = "guard";
+
+  if (controlId === "guardZone1") {
+    zoneIndex = 0;
+  } else if (controlId === "guardZone2") {
+    zoneIndex = 1;
+  } else if (controlId === "exclusionZone1") {
+    zoneIndex = 2;
+    zoneType = "exclusion";
+  } else if (controlId === "exclusionZone2") {
+    zoneIndex = 3;
+    zoneType = "exclusion";
+  } else if (controlId === "exclusionZone3") {
+    zoneIndex = 4;
+    zoneType = "exclusion";
+  } else if (controlId === "exclusionZone4") {
+    zoneIndex = 5;
+    zoneType = "exclusion";
+  }
+
+  if (zoneIndex === null) return;
+
+  const wrappedCallback = onCreated
+    ? (index, zone) => onCreated(zone)
+    : null;
+
+  ppi.setCreatingZone(zoneIndex, wrappedCallback, zoneType);
+}
+
+/**
  * Update a zone's parameters for live preview during editing.
  * Called when form fields change to show immediate visual feedback.
  */
 function updateZoneForEditing(controlId, zone) {
   if (!ppi) return;
 
-  let zoneIndex = null;
   if (controlId === "guardZone1") {
-    zoneIndex = 0;
+    ppi.setGuardZone(0, zone);
   } else if (controlId === "guardZone2") {
-    zoneIndex = 1;
+    ppi.setGuardZone(1, zone);
+  } else if (controlId === "exclusionZone1") {
+    ppi.setExclusionZone(0, zone);
+  } else if (controlId === "exclusionZone2") {
+    ppi.setExclusionZone(1, zone);
+  } else if (controlId === "exclusionZone3") {
+    ppi.setExclusionZone(2, zone);
+  } else if (controlId === "exclusionZone4") {
+    ppi.setExclusionZone(3, zone);
+  }
+}
+
+/**
+ * Enable rect create mode - click-drag on PPI to define rect boundaries
+ * @param {string} controlId - Control ID (e.g., "exclusionRect1")
+ * @param {boolean} creating - Whether to enable create mode
+ * @param {function} onCreated - Callback (rect) when rect is created
+ */
+function setRectCreateMode(controlId, creating, onCreated = null) {
+  if (!ppi) return;
+
+  if (!creating) {
+    ppi.cancelCreating();
+    return;
   }
 
-  if (zoneIndex === null) return;
+  let rectIndex = null;
+  if (controlId === "exclusionRect1") {
+    rectIndex = 0;
+  } else if (controlId === "exclusionRect2") {
+    rectIndex = 1;
+  } else if (controlId === "exclusionRect3") {
+    rectIndex = 2;
+  } else if (controlId === "exclusionRect4") {
+    rectIndex = 3;
+  }
 
-  ppi.setGuardZone(zoneIndex, zone);
+  if (rectIndex === null) return;
+
+  const wrappedCallback = onCreated
+    ? (index, rect) => onCreated(rect)
+    : null;
+
+  ppi.setCreatingRect(rectIndex, wrappedCallback);
+}
+
+/**
+ * Update a rect's parameters for live preview during editing.
+ */
+function updateRectForEditing(controlId, rect) {
+  if (!ppi) return;
+
+  if (controlId === "exclusionRect1") {
+    ppi.setExclusionRect(0, rect);
+  } else if (controlId === "exclusionRect2") {
+    ppi.setExclusionRect(1, rect);
+  } else if (controlId === "exclusionRect3") {
+    ppi.setExclusionRect(2, rect);
+  } else if (controlId === "exclusionRect4") {
+    ppi.setExclusionRect(3, rect);
+  }
 }
 
 /**

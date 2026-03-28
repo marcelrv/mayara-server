@@ -36,13 +36,15 @@ pub struct GuardZone {
 pub type ExclusionZone = GuardZone;
 
 /// Rectangular exclusion zone for stationary radar installations.
-/// Defined by north/south/east/west offsets in meters from radar position.
+/// Defined by two corners (x1,y1) and (x2,y2) that form one edge, plus a width.
+/// Coordinates are in meters from radar position (x=east, y=north).
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 pub struct ExclusionRect {
-    pub north: f64, // North offset in meters (positive = north of radar)
-    pub south: f64, // South offset in meters (positive = south of radar)
-    pub east: f64,  // East offset in meters (positive = east of radar)
-    pub west: f64,  // West offset in meters (positive = west of radar)
+    pub x1: f64,    // First corner X (meters from radar, positive = east)
+    pub y1: f64,    // First corner Y (meters from radar, positive = north)
+    pub x2: f64,    // Second corner X (defines one edge with first corner)
+    pub y2: f64,    // Second corner Y (defines one edge with first corner)
+    pub width: f64, // Perpendicular width of rectangle (always positive)
     pub enabled: bool,
 }
 
@@ -66,23 +68,23 @@ pub struct Radar {
     pub guard_zone_2: Option<GuardZone>,
 
     // Exclusion zones (stationary installations only)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion_zone_1: Option<ExclusionZone>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion_zone_2: Option<ExclusionZone>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion_zone_3: Option<ExclusionZone>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion_zone_4: Option<ExclusionZone>,
 
     // Rectangular exclusion zones (stationary installations only)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion_rect_1: Option<ExclusionRect>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion_rect_2: Option<ExclusionRect>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion_rect_3: Option<ExclusionRect>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion_rect_4: Option<ExclusionRect>,
 
     // ARPA/Target tracking settings
@@ -249,49 +251,75 @@ impl Persistence {
             modified = true;
         }
 
-        let exclusion_zone_1 = radar_info.controls.exclusion_zone(&ControlId::ExclusionZone1);
+        // Only persist enabled exclusion zones to keep settings.json clean
+        let exclusion_zone_1 = radar_info
+            .controls
+            .exclusion_zone(&ControlId::ExclusionZone1)
+            .filter(|z| z.enabled);
         if radar.exclusion_zone_1 != exclusion_zone_1 {
             radar.exclusion_zone_1 = exclusion_zone_1;
             modified = true;
         }
 
-        let exclusion_zone_2 = radar_info.controls.exclusion_zone(&ControlId::ExclusionZone2);
+        let exclusion_zone_2 = radar_info
+            .controls
+            .exclusion_zone(&ControlId::ExclusionZone2)
+            .filter(|z| z.enabled);
         if radar.exclusion_zone_2 != exclusion_zone_2 {
             radar.exclusion_zone_2 = exclusion_zone_2;
             modified = true;
         }
 
-        let exclusion_zone_3 = radar_info.controls.exclusion_zone(&ControlId::ExclusionZone3);
+        let exclusion_zone_3 = radar_info
+            .controls
+            .exclusion_zone(&ControlId::ExclusionZone3)
+            .filter(|z| z.enabled);
         if radar.exclusion_zone_3 != exclusion_zone_3 {
             radar.exclusion_zone_3 = exclusion_zone_3;
             modified = true;
         }
 
-        let exclusion_zone_4 = radar_info.controls.exclusion_zone(&ControlId::ExclusionZone4);
+        let exclusion_zone_4 = radar_info
+            .controls
+            .exclusion_zone(&ControlId::ExclusionZone4)
+            .filter(|z| z.enabled);
         if radar.exclusion_zone_4 != exclusion_zone_4 {
             radar.exclusion_zone_4 = exclusion_zone_4;
             modified = true;
         }
 
-        let exclusion_rect_1 = radar_info.controls.exclusion_rect(&ControlId::ExclusionRect1);
+        // Only persist enabled exclusion rects to keep settings.json clean
+        let exclusion_rect_1 = radar_info
+            .controls
+            .exclusion_rect(&ControlId::ExclusionRect1)
+            .filter(|r| r.enabled);
         if radar.exclusion_rect_1 != exclusion_rect_1 {
             radar.exclusion_rect_1 = exclusion_rect_1;
             modified = true;
         }
 
-        let exclusion_rect_2 = radar_info.controls.exclusion_rect(&ControlId::ExclusionRect2);
+        let exclusion_rect_2 = radar_info
+            .controls
+            .exclusion_rect(&ControlId::ExclusionRect2)
+            .filter(|r| r.enabled);
         if radar.exclusion_rect_2 != exclusion_rect_2 {
             radar.exclusion_rect_2 = exclusion_rect_2;
             modified = true;
         }
 
-        let exclusion_rect_3 = radar_info.controls.exclusion_rect(&ControlId::ExclusionRect3);
+        let exclusion_rect_3 = radar_info
+            .controls
+            .exclusion_rect(&ControlId::ExclusionRect3)
+            .filter(|r| r.enabled);
         if radar.exclusion_rect_3 != exclusion_rect_3 {
             radar.exclusion_rect_3 = exclusion_rect_3;
             modified = true;
         }
 
-        let exclusion_rect_4 = radar_info.controls.exclusion_rect(&ControlId::ExclusionRect4);
+        let exclusion_rect_4 = radar_info
+            .controls
+            .exclusion_rect(&ControlId::ExclusionRect4)
+            .filter(|r| r.enabled);
         if radar.exclusion_rect_4 != exclusion_rect_4 {
             radar.exclusion_rect_4 = exclusion_rect_4;
             modified = true;

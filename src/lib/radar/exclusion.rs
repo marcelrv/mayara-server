@@ -16,13 +16,15 @@ pub struct ExclusionZoneInternal {
     pub end_pixel: usize,
 }
 
-/// Internal representation of a rectangular exclusion zone in meters
+/// Internal representation of a rectangular exclusion zone.
+/// Stores corner-based coordinates for rotated rectangles.
 #[derive(Debug, Clone)]
 pub struct ExclusionRectInternal {
-    pub north: f64,
-    pub south: f64,
-    pub east: f64,
-    pub west: f64,
+    pub x1: f64,    // First corner X (meters from radar)
+    pub y1: f64,    // First corner Y (meters from radar)
+    pub x2: f64,    // Second corner X (defines one edge)
+    pub y2: f64,    // Second corner Y (defines one edge)
+    pub width: f64, // Perpendicular width
 }
 
 /// Precomputed exclusion mask for efficient spoke processing.
@@ -35,6 +37,45 @@ pub struct ExclusionMask {
     mask: Vec<Vec<u8>>,
     spokes: u16,
     pixels_per_spoke: usize,
+}
+
+/// Check if a point is inside a convex polygon using cross product signs
+fn is_point_in_polygon(px: f64, py: f64, corners: &[(f64, f64)]) -> bool {
+    let n = corners.len();
+    if n < 3 {
+        return false;
+    }
+
+    // Check if point is on the same side of all edges
+    let mut sign = None;
+    for i in 0..n {
+        let (ax, ay) = corners[i];
+        let (bx, by) = corners[(i + 1) % n];
+
+        // Vector from a to b
+        let edge_x = bx - ax;
+        let edge_y = by - ay;
+
+        // Vector from a to point
+        let to_point_x = px - ax;
+        let to_point_y = py - ay;
+
+        // Cross product: positive if point is left of edge, negative if right
+        let cross = edge_x * to_point_y - edge_y * to_point_x;
+
+        if cross.abs() < 1e-10 {
+            continue; // Point is on the edge, consider it inside
+        }
+
+        let current_sign = cross > 0.0;
+        match sign {
+            None => sign = Some(current_sign),
+            Some(s) if s != current_sign => return false,
+            _ => {}
+        }
+    }
+
+    true
 }
 
 impl ExclusionMask {
@@ -84,66 +125,87 @@ impl ExclusionMask {
         }
 
         // Build the mask for all rectangular zones
-        // For each spoke, compute the pixel range that intersects the rectangle
+        // Rectangle is defined by corners (x1,y1), (x2,y2) and width
+        // We compute the 4 corners and test ray intersection with the quadrilateral
         let meters_per_pixel = range_meters as f64 / pixels as f64;
 
         for rect in rects {
+            // Compute the 4 corners of the rectangle
+            // Edge from (x1,y1) to (x2,y2), then extend perpendicular by width
+            let dx = rect.x2 - rect.x1;
+            let dy = rect.y2 - rect.y1;
+            let edge_len = (dx * dx + dy * dy).sqrt();
+            if edge_len < 1e-6 || rect.width < 1e-6 {
+                continue; // Degenerate rectangle
+            }
+
+            // Perpendicular unit vector (rotated 90 degrees clockwise)
+            let perp_x = dy / edge_len;
+            let perp_y = -dx / edge_len;
+
+            // 4 corners of the rectangle
+            let corners = [
+                (rect.x1, rect.y1),
+                (rect.x2, rect.y2),
+                (rect.x2 + perp_x * rect.width, rect.y2 + perp_y * rect.width),
+                (rect.x1 + perp_x * rect.width, rect.y1 + perp_y * rect.width),
+            ];
+
+            // Check if origin (0,0) is inside the rectangle using winding number
+            let origin_inside = is_point_in_polygon(0.0, 0.0, &corners);
+
             for spoke in 0..spokes {
-                // Angle for this spoke (0 = north, increasing clockwise)
+                // Ray direction for this spoke (0 = north, increasing clockwise)
                 let angle = (spoke as f64 / spokes as f64) * 2.0 * PI;
-                let sin_a = angle.sin(); // x component (east)
-                let cos_a = angle.cos(); // y component (north)
+                let ray_dx = angle.sin(); // x component (east)
+                let ray_dy = angle.cos(); // y component (north)
 
-                // Find where the ray intersects the rectangle boundaries
-                // Ray: x = d * sin_a, y = d * cos_a
-                // Rectangle: -west <= x <= east, -south <= y <= north
+                // Find ray intersection with the quadrilateral (4 edges)
+                let mut intersections: Vec<f64> = Vec::new();
 
-                // Compute distances to each boundary (if ray hits it)
-                let mut d_min = 0.0_f64;
-                let mut d_max = f64::INFINITY;
+                for i in 0..4 {
+                    let (ax, ay) = corners[i];
+                    let (bx, by) = corners[(i + 1) % 4];
 
-                // X boundaries (east/west)
-                if sin_a.abs() > 1e-10 {
-                    let d_east = rect.east / sin_a;
-                    let d_west = -rect.west / sin_a;
-                    let (d_enter, d_exit) = if sin_a > 0.0 {
-                        (d_west, d_east)
-                    } else {
-                        (d_east, d_west)
-                    };
-                    d_min = d_min.max(d_enter);
-                    d_max = d_max.min(d_exit);
-                } else {
-                    // Ray is vertical (north/south) - check if within east/west bounds
-                    // At d=0, x=0 which is within [-west, east] if west >= 0 and east >= 0
-                    if rect.west < 0.0 || rect.east < 0.0 {
-                        continue; // No intersection
+                    // Edge vector
+                    let ex = bx - ax;
+                    let ey = by - ay;
+
+                    // Solve: origin + t * ray = a + s * edge
+                    let denom = ray_dx * ey - ray_dy * ex;
+                    if denom.abs() < 1e-10 {
+                        continue; // Ray parallel to edge
+                    }
+
+                    // t = distance along ray, s = parameter along edge [0,1]
+                    let t = (ax * ey - ay * ex) / denom;
+                    let s = (ax * ray_dy - ay * ray_dx) / denom;
+
+                    // Check if intersection is within edge bounds and ray is positive
+                    if t > 0.0 && s >= 0.0 && s <= 1.0 {
+                        intersections.push(t);
                     }
                 }
 
-                // Y boundaries (north/south)
-                if cos_a.abs() > 1e-10 {
-                    let d_north = rect.north / cos_a;
-                    let d_south = -rect.south / cos_a;
-                    let (d_enter, d_exit) = if cos_a > 0.0 {
-                        (d_south, d_north)
-                    } else {
-                        (d_north, d_south)
-                    };
-                    d_min = d_min.max(d_enter);
-                    d_max = d_max.min(d_exit);
-                } else {
-                    // Ray is horizontal (east/west) - check if within north/south bounds
-                    if rect.north < 0.0 || rect.south < 0.0 {
-                        continue; // No intersection
-                    }
-                }
+                // Sort intersections
+                intersections.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-                // Check if there's a valid intersection
-                if d_max <= d_min || d_max <= 0.0 {
-                    continue;
-                }
-                d_min = d_min.max(0.0);
+                // Determine range to exclude
+                let (d_min, d_max) = if origin_inside {
+                    // Origin inside: exclude from 0 to first exit
+                    if !intersections.is_empty() {
+                        (0.0, intersections[0])
+                    } else {
+                        continue;
+                    }
+                } else {
+                    // Origin outside: need entry and exit
+                    if intersections.len() >= 2 {
+                        (intersections[0], intersections[1])
+                    } else {
+                        continue;
+                    }
+                };
 
                 // Convert distances to pixel indices
                 let start_pixel = (d_min / meters_per_pixel) as usize;
@@ -208,13 +270,13 @@ pub fn zone_to_internal(
 }
 
 /// Convert rectangular exclusion zone from config to internal format.
-/// Returns None if the rect has invalid bounds.
 pub fn rect_to_internal(rect: &ExclusionRect) -> ExclusionRectInternal {
     ExclusionRectInternal {
-        north: rect.north,
-        south: rect.south,
-        east: rect.east,
-        west: rect.west,
+        x1: rect.x1,
+        y1: rect.y1,
+        x2: rect.x2,
+        y2: rect.y2,
+        width: rect.width,
     }
 }
 
@@ -301,13 +363,16 @@ mod tests {
 
     #[test]
     fn test_exclusion_mask_rectangle() {
-        // Rectangle 100m north, 100m south, 100m east, 100m west from radar
+        // Rectangle: edge from (-100, 100) to (100, 100) with width 200
+        // This creates a rectangle from y=100 down to y=-100 (width extends in -Y direction)
+        // Corners: (-100, 100), (100, 100), (100, -100), (-100, -100)
         // With 1000m range and 1000 pixels, each pixel is 1m
         let rects = vec![ExclusionRectInternal {
-            north: 100.0,
-            south: 100.0,
-            east: 100.0,
-            west: 100.0,
+            x1: -100.0,
+            y1: 100.0,
+            x2: 100.0,
+            y2: 100.0,
+            width: 200.0,
         }];
         let mask = ExclusionMask::new(&[], &rects, 360, 1000, 1000);
 
@@ -336,18 +401,20 @@ mod tests {
     #[test]
     fn test_rect_to_internal() {
         let rect = ExclusionRect {
-            north: 200.0,
-            south: 100.0,
-            east: 150.0,
-            west: 50.0,
+            x1: 0.0,
+            y1: 100.0,
+            x2: 200.0,
+            y2: 100.0,
+            width: 50.0,
             enabled: true,
         };
 
         let internal = rect_to_internal(&rect);
 
-        assert_eq!(internal.north, 200.0);
-        assert_eq!(internal.south, 100.0);
-        assert_eq!(internal.east, 150.0);
-        assert_eq!(internal.west, 50.0);
+        assert_eq!(internal.x1, 0.0);
+        assert_eq!(internal.y1, 100.0);
+        assert_eq!(internal.x2, 200.0);
+        assert_eq!(internal.y2, 100.0);
+        assert_eq!(internal.width, 50.0);
     }
 }
