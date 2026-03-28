@@ -179,25 +179,21 @@ impl EmulatorReportReceiver {
     }
 
     fn update_boat_position(&mut self) {
-        if self.boat_speed == 0.0 {
-            return;
-        }
-
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_update);
         self.last_update = now;
-
-        // Calculate distance traveled
         let elapsed_secs = elapsed.as_secs_f64();
-        let distance = self.boat_speed * KNOTS_TO_MS * elapsed_secs;
 
-        // Update position
-        let heading_rad = self.boat_heading * DEG_TO_RAD;
-        self.boat_position = self
-            .boat_position
-            .position_from_bearing(heading_rad, distance);
+        // Update boat position if moving
+        if self.boat_speed != 0.0 {
+            let distance = self.boat_speed * KNOTS_TO_MS * elapsed_secs;
+            let heading_rad = self.boat_heading * DEG_TO_RAD;
+            self.boat_position = self
+                .boat_position
+                .position_from_bearing(heading_rad, distance);
+        }
 
-        // Update world (moving targets)
+        // Always update world (moving targets) even when boat is stationary
         self.world.update(elapsed_secs);
     }
 
