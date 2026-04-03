@@ -31,16 +31,10 @@ mayara-server -v
 mayara-server -vv
 ```
 
-Once running, open a web browser to `http://localhost:6502` to view the radar display.
 
-If the server doesn't show your radar already, open `Interfaces` to check whether there are networks that are capable of reaching your radar.
 
-* For Navico radars the IPv4 address of the computer running `mayara-server` doesn't matter, any will do.
-* For Garmin radars the computer must have an IPv4 address in the 172.16/12 network.
-* For Raymarine radars the computer must have an IPv4 address on the same network as the radar. This depends on the (mandatory) DHCP server in the network. If you do not have a Raymarine MFD, add your own DHCP server.
-* For Furuno radars the network must have an IPv4 address in the 172.31/16 network.
-
-## Command Line Options
+## 
+Command Line Options
 
 ### Network & Server
 
