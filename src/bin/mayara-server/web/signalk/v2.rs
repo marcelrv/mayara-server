@@ -955,12 +955,7 @@ async fn get_control_value(
             match radar.controls.get_by_id(&control_id) {
                 Some(c) => {
                     let control_value = ControlValue::from(&c, None);
-                    let response = wrap_response(wrap(
-                        &radar_id,
-                        wrap("controls", BareControlValue::from(control_value)),
-                    ));
-
-                    response.into_response()
+                    Json(BareControlValue::from(control_value)).into_response()
                 }
                 None => {
                     // Debug: list all available controls

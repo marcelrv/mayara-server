@@ -89,7 +89,9 @@ impl Web {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let shutdown_tx = self.shutdown_tx.clone(); // Clone as self used in with_state() and with_graceful_shutdown() below
 
-        let router = Router::new().route("/", get(endpoints));
+        let router = Router::new()
+            .route("/", get(root_redirect))
+            .route("/signalk", get(endpoints));
         let router = signalk::v2::routes(router);
 
         let app = router
@@ -157,34 +159,14 @@ struct Server {
     id: &'static str,
 }
 
+async fn root_redirect() -> Redirect {
+    Redirect::to("/gui/")
+}
+
 async fn endpoints(
     State(state): State<Web>,
     headers: hyper::header::HeaderMap,
 ) -> Response {
-    log::debug!("endpoints: headers: {:?}", headers);
-
-    // Check Accept header - if it prefers HTML, redirect to index.html
-    if let Some(accept) = headers.get(axum::http::header::ACCEPT) {
-        if let Ok(accept_str) = accept.to_str() {
-            // Browser requests typically have text/html before application/json
-            if accept_str.contains("text/html")
-                && !accept_str
-                    .split(',')
-                    .position(|s| s.trim().starts_with("application/json"))
-                    .map(|json_pos| {
-                        accept_str
-                            .split(',')
-                            .position(|s| s.trim().starts_with("text/html"))
-                            .map(|html_pos| json_pos < html_pos)
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false)
-            {
-                return Redirect::to("/gui/index.html").into_response();
-            }
-        }
-    }
-
     let host: String = match headers.get(axum::http::header::HOST) {
         Some(host) => host.to_str().unwrap_or("localhost").to_string(),
         None => "localhost".to_string(),
