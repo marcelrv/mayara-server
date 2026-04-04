@@ -22,8 +22,8 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{broadcast, mpsc},
 };
-use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_graceful_shutdown::SubsystemHandle;
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tower_http::trace::TraceLayer;
 use utoipa::ToSchema;
 
@@ -94,8 +94,8 @@ fn load_tls_config(
     let key_file = std::fs::File::open(key_path)
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {}", key_path.display(), e)))?;
 
-    let certs: Vec<_> = rustls_pemfile::certs(&mut io::BufReader::new(cert_file))
-        .collect::<Result<_, _>>()?;
+    let certs: Vec<_> =
+        rustls_pemfile::certs(&mut io::BufReader::new(cert_file)).collect::<Result<_, _>>()?;
     let key = rustls_pemfile::private_key(&mut io::BufReader::new(key_file))?
         .ok_or_else(|| WebError::NoPrivateKey(key_path.display().to_string()))?;
 
@@ -120,7 +120,7 @@ impl Web {
     pub async fn new(subsys: &SubsystemHandle, args: Cli) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
 
-        let tls = args.tls_cert.is_some();
+        let tls = args.tls_cert.is_some() && args.tls_key.is_some();
         let (radars, tx_interface_request) = start_session(subsys, args.clone()).await;
 
         Web {
@@ -161,8 +161,13 @@ impl Web {
             .route("/signalk", get(endpoints))
             .route("/quit", get(quit_handler));
         let router = signalk::v2::routes(router);
-        let router = recordings::routes(router)
-            .route("/signalk/{*rest}", get(api_fallback).put(api_fallback).post(api_fallback).delete(api_fallback));
+        let router = recordings::routes(router).route(
+            "/signalk/{*rest}",
+            get(api_fallback)
+                .put(api_fallback)
+                .post(api_fallback)
+                .delete(api_fallback),
+        );
 
         let router = router
             .fallback_service(serve_assets)

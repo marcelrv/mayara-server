@@ -25,6 +25,7 @@ services:
   #   volumes:
   #     - /srv/mayaraserver-data:/home/mayara/.config/mayara:rw
   #   tmpfs:
+  #     - /home/mayara/.config/mayara
   #     - /tmp
   #   read_only: true
   #   security_opt:
@@ -42,6 +43,7 @@ services:
   #   volumes:
   #     - ./certs:/certs:ro
   #   tmpfs:
+  #     - /home/mayara/.config/mayara
   #     - /tmp
   #   read_only: true
   #   security_opt:
@@ -56,6 +58,7 @@ services:
   #   network_mode: host
   #   command: ["mayara-server", "--stationary", "--static-position", "52.3676", "4.9041", "45.0"]
   #   tmpfs:
+  #     - /home/mayara/.config/mayara
   #     - /tmp
   #   read_only: true
   #   security_opt:
