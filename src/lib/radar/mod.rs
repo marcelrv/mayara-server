@@ -1467,7 +1467,9 @@ impl CommonRadar {
 
     pub(crate) fn send_spoke_message(&mut self) {
         if let Some(message) = self.spoke_message.take() {
-            self.info.broadcast_radar_message(message);
+            if !message.spokes.is_empty() {
+                self.info.broadcast_radar_message(message);
+            }
         }
     }
 

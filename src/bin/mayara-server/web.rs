@@ -171,9 +171,8 @@ impl Web {
 
         let shutdown = async move { _ = shutdown_rx.recv().await };
 
-        let app = router.into_make_service();
-
         if let Some(acceptor) = tls_acceptor {
+            let app = router.into_make_service();
             log::info!(
                 "Starting HTTPS web server on port {} (pid {})",
                 port,
@@ -189,6 +188,7 @@ impl Web {
                 }
             }
         } else {
+            let app = router.into_make_service();
             log::info!(
                 "Starting HTTP web server on port {} (pid {})",
                 port,

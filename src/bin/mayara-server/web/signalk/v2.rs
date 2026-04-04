@@ -1,6 +1,6 @@
 use axum::{
     Error, Json,
-    extract::{self, ConnectInfo, Path, Query, State},
+    extract::{self, Path, Query, State},
     http::Uri,
     response::{IntoResponse, Response},
     routing::get,
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    net::{Ipv4Addr, SocketAddr},
+    net::Ipv4Addr,
     str::FromStr,
 };
 use strum::EnumCount;
@@ -213,7 +213,6 @@ struct RadarApiV3 {
 )]
 async fn get_radars(
     State(state): State<Web>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: hyper::header::HeaderMap,
 ) -> Response {
     let host: String = match headers.get(axum::http::header::HOST) {
@@ -221,7 +220,7 @@ async fn get_radars(
         None => "localhost".to_string(),
     };
 
-    log::debug!("Radar state request from {} for host '{}'", addr, host);
+    log::debug!("Radar state request for host '{}'", host);
 
     let host = format!(
         "{}:{}",
@@ -234,6 +233,7 @@ async fn get_radars(
 
     log::debug!("target host = '{}'", host);
 
+    let ws_scheme = if state.tls { "wss" } else { "ws" };
     let mut api: HashMap<String, RadarApiV3> = HashMap::new();
     for info in state.radars.get_active().clone() {
         let spoke_data_uri = SPOKES_URI.replace("{id}", &info.key());
@@ -241,8 +241,8 @@ async fn get_radars(
             name: info.controls.user_name(),
             brand: info.brand.to_string(),
             model: info.controls.model_name(),
-            spoke_data_url: format!("ws://{}{}", host, spoke_data_uri),
-            stream_url: format!("ws://{}{}", host, CONTROL_URI),
+            spoke_data_url: format!("{}://{}{}", ws_scheme, host, spoke_data_uri),
+            stream_url: format!("{}://{}{}", ws_scheme, host, CONTROL_URI),
             radar_ip_address: *info.addr.ip(),
         };
 
@@ -264,7 +264,6 @@ async fn get_radars(
 )]
 async fn get_interfaces(
     State(state): State<Web>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: hyper::header::HeaderMap,
 ) -> Response {
     let host: String = match headers.get(axum::http::header::HOST) {
@@ -272,7 +271,7 @@ async fn get_interfaces(
         None => "localhost".to_string(),
     };
 
-    log::debug!("Interface state request from {} for host '{}'", addr, host);
+    log::debug!("Interface state request for host '{}'", host);
 
     let (tx, mut rx) = mpsc::channel(1);
     if let Err(_) = state.tx_interface_request.send(Some(tx)) {
@@ -419,7 +418,6 @@ impl Capabilities {
 async fn get_radar(
     Path(radar_id): Path<String>,
     State(state): State<Web>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: hyper::header::HeaderMap,
 ) -> Response {
     let host: String = match headers.get(axum::http::header::HOST) {
@@ -427,11 +425,7 @@ async fn get_radar(
         None => "localhost".to_string(),
     };
 
-    log::debug!(
-        "Radar capabilities request from {} for host '{}'",
-        addr,
-        host
-    );
+    log::debug!("Radar capabilities request for host '{}'", host);
 
     let host = format!(
         "{}:{}",
@@ -1113,13 +1107,11 @@ async fn control_stream_docs() {}
 
 async fn control_stream_handler(
     State(state): State<Web>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Query(params): Query<SignalKWebSocket>,
     ws: WebSocketUpgrade,
 ) -> Response {
     log::debug!(
-        "stream request for \"/signalk/v1/stream\" from {} params={:?}",
-        addr,
+        "stream request for \"/signalk/v1/stream\" params={:?}",
         params
     );
 
