@@ -1465,7 +1465,7 @@ impl NavicoReportReceiver {
             );
             return None;
         }
-        if header.status != 0x02 && header.status != 0x12 {
+        if header.status != 0x02 && header.status != 0x12 && header.status != 0xc2 {
             log::warn!("Spoke with illegal status (0x{:x}) ignored", header.status);
             return None;
         }
@@ -1497,7 +1497,7 @@ impl NavicoReportReceiver {
             );
             return None;
         }
-        if header.status != 0x02 && header.status != 0x12 {
+        if header.status != 0x02 && header.status != 0x12 && header.status != 0xc2 {
             log::warn!("Spoke with illegal status (0x{:x}) ignored", header.status);
             return None;
         }
