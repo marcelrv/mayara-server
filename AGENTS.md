@@ -44,6 +44,7 @@ Use conventional format: `<type>(<scope>): <subject>` where type = feat|fix|docs
 Keep commits small and atomic - one logical change per commit. Split unrelated changes into separate commits. The commit history tells a story; each commit should be a meaningful, self-contained step.
 
 **MANDATORY:** Always add a one line update to CHANGELOG.md for each set of commits pertaining to a separate issue, PR or general change.
+**MANDATORY:** Never amend commits that have already been pushed to GitHub. Only amend local, unpushed commits.
 **MANDATORY:** Always rebase and clean up commit history before creating a PR or pushing changes. Amend fixes and corrections to the relevant existing commit instead of creating chains of "fix typo" or "oops" commits. The final history should contain only intentional, complete commits - no work-in-progress artifacts.
 
 ## Pull Request Guidelines
