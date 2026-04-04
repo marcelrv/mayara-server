@@ -9,7 +9,7 @@
  * in sync with what the server writes.
  *
  * Usage:
- *   node spoke_viewer.mjs [--url http://localhost:6502]
+ *   node spoke_viewer.mjs [--url http://localhost:6502] [--insecure]
  *
  * Requirements (installed automatically by run.sh):
  *   npm install protobufjs ws
@@ -18,9 +18,6 @@
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { parseArgs } from "util";
-
-// Allow self-signed certificates for TLS connections
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
 import protobuf from "protobufjs";
 import WebSocket from "ws";
@@ -38,7 +35,7 @@ const PROTO_PATH = resolve(
   "src",
   "lib",
   "protos",
-  "RadarMessage.proto"
+  "RadarMessage.proto",
 );
 
 const root = protobuf.loadSync(PROTO_PATH);
@@ -55,13 +52,11 @@ async function fetchJson(url) {
 }
 
 async function discoverRadar(baseUrl) {
-  const data = await fetchJson(
-    `${baseUrl}/signalk/v2/api/vessels/self/radars`
-  );
+  const data = await fetchJson(`${baseUrl}/signalk/v2/api/vessels/self/radars`);
   const ids = Object.keys(data);
   if (ids.length === 0) {
     console.error(
-      "No radars found. Is the server running with --emulator or a real radar?"
+      "No radars found. Is the server running with --emulator or a real radar?",
     );
     process.exit(1);
   }
@@ -70,7 +65,7 @@ async function discoverRadar(baseUrl) {
 
 async function fetchCapabilities(baseUrl, radarId) {
   return fetchJson(
-    `${baseUrl}/signalk/v2/api/vessels/self/radars/${radarId}/capabilities`
+    `${baseUrl}/signalk/v2/api/vessels/self/radars/${radarId}/capabilities`,
   );
 }
 
@@ -128,8 +123,15 @@ function fmtPosition(lat, lon) {
 
 async function main() {
   const { values } = parseArgs({
-    options: { url: { type: "string", default: "http://localhost:6502" } },
+    options: {
+      url: { type: "string", default: "http://localhost:6502" },
+      insecure: { type: "boolean", short: "k", default: false },
+    },
   });
+  if (values.insecure) {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+  }
+
   const baseUrl = values.url;
   const wsBase = baseUrl.replace(/^http/, "ws");
 
@@ -223,9 +225,7 @@ async function main() {
 
   // Print spoke field documentation
   console.log("Spoke fields (from RadarMessage.proto):");
-  console.log(
-    `  angle   - Rotation from bow [0..${spokesPerRev}) clockwise`
-  );
+  console.log(`  angle   - Rotation from bow [0..${spokesPerRev}) clockwise`);
   console.log("  bearing - True bearing from North (optional)");
   console.log("  range   - Range of last pixel in meters");
   console.log("  time    - Epoch milliseconds (optional)");
@@ -235,38 +235,35 @@ async function main() {
 
   // Legend
   console.log(
-    `  ASCII legend:  ${[...SHADE].map((c, i) => `${c}=${i}`).join("  ")}`
+    `  ASCII legend:  ${[...SHADE].map((c, i) => `${c}=${i}`).join("  ")}`,
   );
   console.log(
-    `                 (pixel values are mapped to ${SHADE.length} levels)`
+    `                 (pixel values are mapped to ${SHADE.length} levels)`,
   );
   console.log();
 
   // Column headers
   console.log(
-    `  ${"angle".padStart(7)} ${"brng".padStart(6)} ${"range".padStart(7)} ${"len".padStart(4)}  spoke data`
+    `  ${"angle".padStart(7)} ${"brng".padStart(6)} ${"range".padStart(7)} ${"len".padStart(4)}  spoke data`,
   );
   console.log(
-    `  ${"─".repeat(7)} ${"─".repeat(6)} ${"─".repeat(7)} ${"─".repeat(4)}  ${"─".repeat(64)}`
+    `  ${"─".repeat(7)} ${"─".repeat(6)} ${"─".repeat(7)} ${"─".repeat(4)}  ${"─".repeat(64)}`,
   );
 
   for (const spoke of sampled) {
     const angleStr = fmtAngle(spoke.angle, spokesPerRev);
-    const bearing =
-      spoke.bearing != null ? spoke.bearing : null;
+    const bearing = spoke.bearing != null ? spoke.bearing : null;
     const bearingStr = fmtBearing(bearing, spokesPerRev);
     const rangeStr = fmtRange(spoke.range).padStart(7);
     const dataLen = String(spoke.data.length).padStart(4);
     const ascii = spokeToAscii(spoke.data);
 
-    console.log(
-      `  ${angleStr} ${bearingStr} ${rangeStr} ${dataLen}  ${ascii}`
-    );
+    console.log(`  ${angleStr} ${bearingStr} ${rangeStr} ${dataLen}  ${ascii}`);
   }
 
   console.log();
   console.log(
-    `  Sampled ${sampled.length} of ${spokesPerRev} spokes (1 per ${sampleInterval})`
+    `  Sampled ${sampled.length} of ${spokesPerRev} spokes (1 per ${sampleInterval})`,
   );
   console.log();
 }
@@ -295,6 +292,7 @@ function on(emitter, event) {
   });
   emitter.on("error", (err) => {
     done = true;
+    console.error("WebSocket error:", err.message || err);
     if (resolve) resolve({ value: undefined, done: true });
   });
 
@@ -316,6 +314,12 @@ function on(emitter, event) {
 }
 
 main().catch((err) => {
-  console.error(err.message || err);
+  const cause = err.cause?.message || err.cause?.code || "";
+  const msg = err.message || String(err);
+  if (cause.includes("self-signed") || cause.includes("CERT") || cause.includes("certificate")) {
+    console.error(`${cause}\nIf using a self-signed certificate, pass --insecure.`);
+  } else {
+    console.error(msg);
+  }
   process.exit(1);
 });

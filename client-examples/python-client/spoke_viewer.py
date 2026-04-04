@@ -6,7 +6,7 @@ Connects to a running mayara-server, discovers the first radar,
 and displays sampled spoke data as ASCII art.
 
 Usage:
-    python3 spoke_viewer.py [--url http://localhost:6502]
+    python3 spoke_viewer.py [--url http://localhost:6502] [--insecure]
 
 Requirements:
     pip install websockets requests protobuf
@@ -15,13 +15,13 @@ Requirements:
 import argparse
 import asyncio
 import math
+import ssl
 import struct
 import sys
 import time
 from pathlib import Path
 
 import requests
-import ssl
 import websockets
 
 # ---------------------------------------------------------------------------
@@ -95,9 +95,11 @@ pb2 = load_proto()
 # REST helpers
 # ---------------------------------------------------------------------------
 
+verify_tls = True
+
 def discover_radar(base_url):
     """Fetch the first radar from the API and return (radar_id, radar_info)."""
-    r = requests.get(f"{base_url}/signalk/v2/api/vessels/self/radars", verify=False)
+    r = requests.get(f"{base_url}/signalk/v2/api/vessels/self/radars", verify=verify_tls)
     r.raise_for_status()
     data = r.json()
     radars = data
@@ -109,7 +111,7 @@ def discover_radar(base_url):
 
 def fetch_capabilities(base_url, radar_id):
     """Fetch radar capabilities."""
-    r = requests.get(f"{base_url}/signalk/v2/api/vessels/self/radars/{radar_id}/capabilities", verify=False)
+    r = requests.get(f"{base_url}/signalk/v2/api/vessels/self/radars/{radar_id}/capabilities", verify=verify_tls)
     r.raise_for_status()
     return r.json()
 
@@ -175,7 +177,7 @@ def format_position(lat, lon):
 # Main spoke viewer
 # ---------------------------------------------------------------------------
 
-async def view_spokes(base_url, ws_url):
+async def view_spokes(base_url, ws_url, insecure):
     # Discover radar
     radar_id, radar_info = discover_radar(base_url)
     caps = fetch_capabilities(base_url, radar_id)
@@ -213,11 +215,14 @@ async def view_spokes(base_url, ws_url):
     print(f"  URL: {spoke_url}")
     print()
 
-    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
+    ws_ssl = None
+    if spoke_url.startswith("wss") and insecure:
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+        ws_ssl = ssl_ctx
 
-    async with websockets.connect(spoke_url, ssl=ssl_ctx if spoke_url.startswith("wss") else None) as ws:
+    async with websockets.connect(spoke_url, ssl=ws_ssl) as ws:
         # Collect one revolution worth of spokes
         seen = set()
         sampled = []
@@ -309,16 +314,25 @@ async def view_spokes(base_url, ws_url):
 def main():
     parser = argparse.ArgumentParser(description="Spoke viewer for mayara-server")
     parser.add_argument("--url", default="http://localhost:6502", help="Server base URL")
+    parser.add_argument("--insecure", "-k", action="store_true",
+                        help="Allow insecure TLS connections (self-signed certificates)")
     args = parser.parse_args()
+
+    global verify_tls
+    if args.insecure:
+        verify_tls = False
 
     ws_url = args.url.replace("http://", "ws://").replace("https://", "wss://")
 
     try:
-        asyncio.run(view_spokes(args.url, ws_url))
+        asyncio.run(view_spokes(args.url, ws_url, args.insecure))
     except KeyboardInterrupt:
         print("\nInterrupted.")
     except requests.ConnectionError:
-        sys.exit(f"Cannot connect to {args.url}. Is mayara-server running?")
+        if args.url.startswith("https://"):
+            sys.exit(f"Cannot connect to {args.url}. If using a self-signed certificate, pass --insecure.")
+        else:
+            sys.exit(f"Cannot connect to {args.url}. Is mayara-server running?")
 
 
 if __name__ == "__main__":
