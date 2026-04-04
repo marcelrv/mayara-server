@@ -363,6 +363,9 @@ async fn spokes_stream(
                         }
                         trace!("Sent radar message {} bytes", len);
                     },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        debug!("Spoke stream lagged by {} messages, resuming", n);
+                    },
                     Err(e) => {
                         debug!("Error on RadarMessage channel: {}", e);
                         break;

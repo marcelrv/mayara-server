@@ -18,6 +18,7 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 - `InvalidControlId` returns 404 (was 400/500)
 - Unmatched `/signalk/` paths return 404 with list of all valid API endpoints (generated from OpenAPI spec)
 - Empty spoke messages no longer broadcast to WebSocket clients
+- Spoke WebSocket stream no longer disconnects on broadcast lag (#31)
 
 ### Changed
 
