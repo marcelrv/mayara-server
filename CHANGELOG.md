@@ -8,12 +8,19 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 
 ## [Unreleased]
 
+## [3.4.0]
+
 ### Changed
 
+- **API version bumped to 3.2.0** (Signal K Radar API)
 - `GET /signalk/v2/api/vessels/self/radars` returns bare radar map (removed `version`/`radars` wrapper)
-- All REST endpoints now return unwrapped responses
+- All REST endpoints now return unwrapped responses — no wrapper on any endpoint
 - OpenAPI schema: `allowed`, `error`, and `timestamp` fields on ControlValue marked `readOnly`
 - OpenAPI schema: renamed `RadarApiV3` to `RadarInfo`, `ArpaTargetApi` to `ArpaTarget`
+
+### Removed
+
+- `RadarsResponse`, `FullSignalKResponse`, and `wrap_response()` — no longer needed
 
 ## [3.3.0]
 
@@ -80,7 +87,8 @@ logged as github issues.
 
 ## Versions
 
-[Unreleased]: https://github.com/canboat/canboat/compare/v3.3.0..HEAD
+[Unreleased]: https://github.com/canboat/canboat/compare/v3.4.0..HEAD
+[3.4.0]: https://github.com/canboat/canboat/compare/v3.3.0...v3.4.0
 [3.3.0]: https://github.com/canboat/canboat/compare/v3.2.0...v3.3.0
 [3.2.0]: https://github.com/canboat/canboat/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/canboat/canboat/compare/v3.0.0...v3.1.0
