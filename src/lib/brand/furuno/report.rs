@@ -725,26 +725,33 @@ impl FurunoReportReceiver {
     }
 
     async fn start_data_socket(&mut self) -> io::Result<()> {
-        let mut last_err = None;
+        let want_multicast = matches!(
+            self.receive_type,
+            ReceiveAddressType::Both | ReceiveAddressType::Multicast
+        );
+        let want_broadcast = matches!(
+            self.receive_type,
+            ReceiveAddressType::Both | ReceiveAddressType::Broadcast
+        );
 
-        if self.receive_type != ReceiveAddressType::Broadcast && self.multicast_socket.is_none() {
+        let mut r = Ok(());
+
+        if want_multicast && self.multicast_socket.is_none() {
             if let Err(e) = self.start_multicast_socket().await {
-                last_err = Some(e);
+                r = Err(e);
             }
         }
-        if self.receive_type != ReceiveAddressType::Multicast && self.broadcast_socket.is_none() {
+        if want_broadcast && self.broadcast_socket.is_none() {
             if let Err(e) = self.start_broadcast_socket().await {
-                last_err = Some(e);
+                r = Err(e);
             }
         }
 
         if self.multicast_socket.is_some() || self.broadcast_socket.is_some() {
-            Ok(())
-        } else if let Some(e) = last_err {
-            Err(e)
-        } else {
-            Ok(())
+            r = Ok(());
         }
+
+        r
     }
 
     #[cfg(target_os = "macos")]
