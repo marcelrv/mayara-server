@@ -113,6 +113,12 @@ struct RadarFramePkt {
 
 const FRAME_HEADER_LENGTH: usize = size_of::<FrameHeader>();
 const RADAR_LINE_HEADER_LENGTH: usize = size_of::<Gen3PlusHeader>();
+
+// Spoke status values observed across Navico radar models.
+// 0x02: valid spoke data (documented in Dabrowski et al. 2011 BR24 paper)
+// 0x12: valid spoke data (observed on 4G+, meaning of upper bits unknown)
+// 0xC2: valid spoke data (observed on HALO20+, meaning of upper bits unknown)
+const KNOWN_SPOKE_STATUSES: [u8; 3] = [0x02, 0x12, 0xC2];
 const RADAR_LINE_LENGTH: usize = size_of::<RadarLine>();
 
 // The LookupSpokeEnum is an index into an array, really
@@ -1465,8 +1471,8 @@ impl NavicoReportReceiver {
             );
             return None;
         }
-        if header.status != 0x02 && header.status != 0x12 && header.status != 0xc2 {
-            log::warn!("Spoke with illegal status (0x{:x}) ignored", header.status);
+        if !KNOWN_SPOKE_STATUSES.contains(&header.status) {
+            log::warn!("Spoke with unknown or invalid status (0x{:x}) ignored", header.status);
             return None;
         }
 
@@ -1497,8 +1503,8 @@ impl NavicoReportReceiver {
             );
             return None;
         }
-        if header.status != 0x02 && header.status != 0x12 && header.status != 0xc2 {
-            log::warn!("Spoke with illegal status (0x{:x}) ignored", header.status);
+        if !KNOWN_SPOKE_STATUSES.contains(&header.status) {
+            log::warn!("Spoke with unknown or invalid status (0x{:x}) ignored", header.status);
             return None;
         }
 
