@@ -8,6 +8,10 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 
 ## [Unreleased]
 
+### Removed
+
+- Duplicate protobuf.js library copies in `web/imports/` and `web/protobuf/` (only `web/gui/protobuf/` is used)
+
 ### Added
 
 - Optional TLS support (`--tls-cert` and `--tls-key` flags) (#36, #37)
