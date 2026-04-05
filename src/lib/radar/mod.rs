@@ -1355,11 +1355,12 @@ impl CommonRadar {
 
             if log::log_enabled!(log::Level::Trace) {
                 // Verify spoke contains legal values
+                let max_value = self.info.legend.pixels.len() as u8;
                 for i in 0..generic_spoke.len() {
-                    if generic_spoke[i] >= self.info.legend.pixel_colors {
+                    if generic_spoke[i] >= max_value {
                         panic!(
-                            "Spoke contains value {} which is > {}",
-                            generic_spoke[i], self.info.legend.pixel_colors
+                            "Spoke contains value {} which is >= {}",
+                            generic_spoke[i], max_value
                         );
                     }
                 }
@@ -1405,25 +1406,13 @@ impl CommonRadar {
                         }
                     }
                 }
-
-                // Get ready spokes (those not touched by any active blob)
-                let ready_spokes = detector.get_ready_spokes();
-                for mut ready_spoke in ready_spokes {
-                    // Apply trail processing
-                    self.trails.update_trails(
-                        &mut ready_spoke,
-                        &self.info.legend,
-                        &self.info.controls,
-                    );
-                    message.spokes.push(ready_spoke);
-                }
-            } else {
-                // No blob detection - process directly
-                let mut spoke = spoke;
-                self.trails
-                    .update_trails(&mut spoke, &self.info.legend, &self.info.controls);
-                message.spokes.push(spoke);
             }
+
+            // Always broadcast spoke to clients
+            let mut spoke = spoke;
+            self.trails
+                .update_trails(&mut spoke, &self.info.legend, &self.info.controls);
+            message.spokes.push(spoke);
 
             if angle < self.prev_angle {
                 let ms = self.info.full_rotation();
