@@ -14,6 +14,7 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 
 ### Fixed
 
+- Furuno spoke data sockets retry on failure instead of silently staying dead
 - Accept 0xc2 as valid Navico spoke status for HALO20+ compatibility (#27)
 - Move inline `display: none` style to CSS for WebGPU warning element
 - `NoSuchRadar` returns 404 (was 500), response includes list of valid radar IDs

@@ -233,24 +233,38 @@ impl FurunoReportReceiver {
     }
 
     pub async fn run(mut self, subsys: SubsystemHandle) -> Result<(), RadarError> {
-        self.start_data_socket().await?;
-        self.start_command_stream().await?;
         loop {
+            if let Err(e) = self.start_data_socket().await {
+                log::warn!("{}: Failed to start data sockets: {}", self.common.key, e);
+                tokio::select! {
+                    _ = subsys.on_shutdown_requested() => return Ok(()),
+                    _ = sleep(Duration::from_millis(1000)) => {}
+                }
+                continue;
+            }
+
+            if self.stream.is_none() && !self.common.replay {
+                self.login_to_radar()?;
+                self.start_command_stream().await?;
+            }
+
             if self.stream.is_some() || self.common.replay {
                 match self.data_loop(&subsys).await {
                     Err(RadarError::Shutdown) => {
                         return Ok(());
                     }
                     _ => {
-                        // Ignore, reopen socket
+                        // Reopen sockets on next iteration
                     }
                 }
                 self.stream = None;
-            } else {
-                sleep(Duration::from_millis(1000)).await;
-                self.login_to_radar()?;
-                self.start_command_stream().await?;
-                self.start_data_socket().await?;
+                self.multicast_socket = None;
+                self.broadcast_socket = None;
+            }
+
+            tokio::select! {
+                _ = subsys.on_shutdown_requested() => return Ok(()),
+                _ = sleep(Duration::from_millis(1000)) => {}
             }
         }
     }
@@ -669,18 +683,18 @@ impl FurunoReportReceiver {
                     &self.common.info.spoke_data_addr,
                     &self.common.info.nic_addr
                 );
+                Ok(())
             }
             Err(e) => {
-                sleep(Duration::from_millis(1000)).await;
-                log::debug!(
+                log::warn!(
                     "{} via {}: listen multicast failed: {}",
                     &self.common.info.spoke_data_addr,
                     &self.common.info.nic_addr,
                     e
                 );
+                Err(e)
             }
-        };
-        Ok(())
+        }
     }
 
     async fn start_broadcast_socket(&mut self) -> io::Result<()> {
@@ -696,29 +710,41 @@ impl FurunoReportReceiver {
                     &FURUNO_DATA_BROADCAST_ADDRESS,
                     &self.common.info.nic_addr
                 );
+                Ok(())
             }
             Err(e) => {
-                sleep(Duration::from_millis(1000)).await;
-                log::debug!(
+                log::warn!(
                     "{} via {}: listen broadcast failed: {}",
                     &FURUNO_DATA_BROADCAST_ADDRESS,
                     &self.common.info.nic_addr,
                     e
                 );
+                Err(e)
             }
-        };
-        Ok(())
+        }
     }
 
     async fn start_data_socket(&mut self) -> io::Result<()> {
+        let mut last_err = None;
+
         if self.receive_type != ReceiveAddressType::Broadcast && self.multicast_socket.is_none() {
-            self.start_multicast_socket().await?;
+            if let Err(e) = self.start_multicast_socket().await {
+                last_err = Some(e);
+            }
         }
         if self.receive_type != ReceiveAddressType::Multicast && self.broadcast_socket.is_none() {
-            self.start_broadcast_socket().await?;
+            if let Err(e) = self.start_broadcast_socket().await {
+                last_err = Some(e);
+            }
         }
 
-        Ok(())
+        if self.multicast_socket.is_some() || self.broadcast_socket.is_some() {
+            Ok(())
+        } else if let Some(e) = last_err {
+            Err(e)
+        } else {
+            Ok(())
+        }
     }
 
     #[cfg(target_os = "macos")]
