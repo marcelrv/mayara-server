@@ -1273,9 +1273,9 @@ impl SharedControls {
                     let i = value
                         .parse::<i32>()
                         .map_err(|_| ControlError::Invalid(control_id.clone(), value))?;
-                    control
-                        .set(i as f64, None, None, None)
-                        .map(|_| Some(control.clone()))
+                    Ok(control
+                        .set(i as f64, None, None, None)?
+                        .map(|_| control.clone()))
                 }
             } else {
                 Err(ControlError::NotSupported(*control_id))
@@ -1304,35 +1304,22 @@ impl SharedControls {
                         _ => Err(ControlError::Invalid(*control_id, format!("{:?}", value))),
                     }
                 } else {
-                    match value.clone() {
-                        Value::String(s) => {
-                            let i = s.parse::<i32>().map_err(|_| {
-                                ControlError::Invalid(control_id.clone(), format!("{:?}", value))
-                            })?;
-                            control
-                                .set(i as f64, None, None, None)
-                                .map(|_| Some(control.clone()))
-                        }
-                        Value::Bool(b) => {
-                            let i = b as i32 as f64;
-                            control
-                                .set(i as f64, None, None, None)
-                                .map(|_| Some(control.clone()))
-                        }
-                        Value::Number(n) => match n.as_f64() {
-                            Some(n) => control
-                                .set(n as f64, None, None, None)
-                                .map(|_| Some(control.clone())),
-                            None => Err(ControlError::Invalid(
-                                control_id.clone(),
-                                format!("{:?}", value),
-                            )),
-                        },
+                    let n = match value.clone() {
+                        Value::String(s) => s.parse::<i32>().map(|i| i as f64).map_err(|_| {
+                            ControlError::Invalid(control_id.clone(), format!("{:?}", value))
+                        }),
+                        Value::Bool(b) => Ok(b as i32 as f64),
+                        Value::Number(n) => n.as_f64().ok_or_else(|| {
+                            ControlError::Invalid(control_id.clone(), format!("{:?}", value))
+                        }),
                         _ => Err(ControlError::Invalid(
                             control_id.clone(),
                             format!("{:?}", value),
                         )),
-                    }
+                    }?;
+                    Ok(control
+                        .set(n, None, None, None)?
+                        .map(|_| control.clone()))
                 }
             } else {
                 Err(ControlError::NotSupported(*control_id))
