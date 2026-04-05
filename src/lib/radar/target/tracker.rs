@@ -185,23 +185,24 @@ impl ActiveTarget {
     fn update(&mut self, candidate: &TargetCandidate) -> bool {
         let delta_time = (candidate.time.saturating_sub(self.last_update)) as f64 / 1000.0;
 
-        // Calculate direct velocity from measured positions for turn rejection check
-        let (measured_sog, measured_cog) = if delta_time > 1.0 {
-            let distance = calculate_distance(&self.position, &candidate.position);
-            let sog = distance / delta_time;
-            let cog = calculate_bearing(&self.position, &candidate.position);
-            (Some(sog), Some(cog))
+        // Calculate measured COG for turn rejection check
+        let measured_cog = if delta_time > 1.0 {
+            Some(calculate_bearing(&self.position, &candidate.position))
         } else {
-            (None, None)
+            None
         };
 
         // Turn rejection: reject implausible maneuvers for fast targets in early tracking
         // Based on radar_pi: turn > 130° at speed > 5 m/s for status < 5
+        // Use Kalman-estimated SOG rather than measured SOG: a stationary target's blob
+        // position varies by tens of meters per rotation, producing apparent measured
+        // speeds of 8-10 m/s with random directions. The Kalman filter correctly
+        // converges toward the true low speed and avoids false rejections.
         if self.update_count >= 2 && self.update_count < 5 {
-            if let (Some(current_cog), Some(new_cog), Some(speed)) =
-                (self.cog, measured_cog, measured_sog)
+            if let (Some(current_cog), Some(new_cog), Some(kalman_sog)) =
+                (self.cog, measured_cog, self.sog)
             {
-                if speed > TURN_REJECTION_SPEED_MS {
+                if kalman_sog > TURN_REJECTION_SPEED_MS {
                     let mut turn = (new_cog - current_cog).to_degrees();
                     if turn > 180.0 {
                         turn -= 360.0;
@@ -211,10 +212,10 @@ impl ActiveTarget {
                     }
                     if turn.abs() > MAX_TURN_ANGLE_DEG {
                         log::debug!(
-                            "Target {}: rejecting update - turn {:.1}° at {:.1} m/s",
+                            "Target {}: rejecting update - turn {:.1}° at {:.1} m/s (Kalman)",
                             self.id,
                             turn,
-                            speed
+                            kalman_sog
                         );
                         return false;
                     }

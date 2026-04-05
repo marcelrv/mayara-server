@@ -28,6 +28,7 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 - Guard zones, exclusion rects, and other target controls returned 400 despite succeeding
 - NMEA HDT heading was sent in degrees instead of radians
 - NMEA VTG COG was sent in degrees instead of radians
+- Slow/stationary targets repeatedly lost and reacquired due to turn rejection using noisy measured speed instead of Kalman-estimated speed
 - Heading extracted from spoke data for GUI when no external heading source available
 - Furuno spoke data sockets retry on failure instead of silently staying dead
 - Accept 0xc2 as valid Navico spoke status for HALO20+ compatibility (#27)
