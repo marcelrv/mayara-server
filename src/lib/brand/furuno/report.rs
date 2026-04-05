@@ -234,32 +234,23 @@ impl FurunoReportReceiver {
 
     pub async fn run(mut self, subsys: SubsystemHandle) -> Result<(), RadarError> {
         loop {
+            // Each time we start the loop, there is no stream
+            // and none of the data sockets are open.
+            self.stream = None;
+            self.multicast_socket = None;
+            self.broadcast_socket = None;
+
             if let Err(e) = self.start_data_socket().await {
                 log::warn!("{}: Failed to start data sockets: {}", self.common.key, e);
-                tokio::select! {
-                    _ = subsys.on_shutdown_requested() => return Ok(()),
-                    _ = sleep(Duration::from_millis(1000)) => {}
-                }
-                continue;
-            }
-
-            if self.stream.is_none() && !self.common.replay {
-                self.login_to_radar()?;
-                self.start_command_stream().await?;
-            }
-
-            if self.stream.is_some() || self.common.replay {
+            } else if let Err(e) = self.login_to_radar() {
+                log::warn!("{}: Failed to login to radar: {}", self.common.key, e);
+            } else if let Err(e) = self.start_command_stream().await {
+                log::warn!("{}: Failed to start command stream: {}", self.common.key, e);
+            } else {
                 match self.data_loop(&subsys).await {
-                    Err(RadarError::Shutdown) => {
-                        return Ok(());
-                    }
-                    _ => {
-                        // Reopen sockets on next iteration
-                    }
+                    Err(RadarError::Shutdown) => return Ok(()),
+                    _ => {}
                 }
-                self.stream = None;
-                self.multicast_socket = None;
-                self.broadcast_socket = None;
             }
 
             tokio::select! {
@@ -736,12 +727,12 @@ impl FurunoReportReceiver {
 
         let mut r = Ok(());
 
-        if want_multicast && self.multicast_socket.is_none() {
+        if want_multicast {
             if let Err(e) = self.start_multicast_socket().await {
                 r = Err(e);
             }
         }
-        if want_broadcast && self.broadcast_socket.is_none() {
+        if want_broadcast {
             if let Err(e) = self.start_broadcast_socket().await {
                 r = Err(e);
             }
