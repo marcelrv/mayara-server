@@ -1198,6 +1198,11 @@ impl CommonRadar {
 
                 // Handle ARPA/target tracking and exclusion zone controls directly
                 match cv.id {
+                    ControlId::GuardZone1 | ControlId::GuardZone2 => {
+                        // Guard zones are already updated above, just persist and return
+                        self.update();
+                        return Ok(());
+                    }
                     ControlId::ArpaDetectMaxSpeed => {
                         let value = cv.as_value()?;
                         let result = self
