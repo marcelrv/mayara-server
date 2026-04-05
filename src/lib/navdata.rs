@@ -692,7 +692,7 @@ impl NavigationData {
                 );
             }
             Ok(ParsedMessage::Vtg(vtg)) => {
-                set_cog(vtg.cog_true);
+                set_cog(vtg.cog_true.map(|c| c.to_radians()));
                 let sog = vtg
                     .sog_kph
                     .or_else(|| vtg.sog_knots.map(|k| k * 1.852))
