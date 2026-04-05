@@ -1,4 +1,4 @@
-use std::f64::consts::PI;
+use std::f64::consts::{PI, TAU};
 
 use crate::radar::GeoPosition;
 
@@ -124,7 +124,7 @@ impl CirclingTarget {
     fn update(&mut self, elapsed_secs: f64) {
         // Update angle (clockwise motion)
         self.angle += self.angular_velocity * elapsed_secs;
-        self.angle %= 2.0 * PI;
+        self.angle %= TAU;
 
         // Calculate bearing from center to boat position
         // angle=0 → south (bearing=PI), angle increases clockwise
@@ -500,7 +500,7 @@ fn distance_and_bearing(from: &GeoPosition, to: &GeoPosition) -> (f64, f64) {
     let bearing = y.atan2(x);
 
     // Normalize bearing to [0, 2*PI)
-    let bearing = (bearing + 2.0 * PI) % (2.0 * PI);
+    let bearing = (bearing + TAU) % TAU;
 
     (distance, bearing)
 }

@@ -22,7 +22,7 @@ const DEFAULT_BLOB_THRESHOLD: u8 = 5;
 pub const MIN_TARGET_SIZE_M: f64 = 5.0;
 
 /// Maximum ship size in meters
-pub const MAX_TARGET_SIZE_M: f64 = 600.0;
+pub const MAX_TARGET_SIZE_M: f64 = 1000.0;
 
 /// A single pixel belonging to a blob
 #[derive(Clone, Debug)]
@@ -231,10 +231,10 @@ impl BlobDetector {
 
                 // Convert angles from radians to spokes
                 // Guard zones are head-relative (0 = forward)
-                let start_spoke = ((zone.start_angle / (2.0 * PI))
+                let start_spoke = ((zone.start_angle / TAU)
                     * self.spokes_per_revolution as f64) as u16
                     % self.spokes_per_revolution;
-                let end_spoke = ((zone.end_angle / (2.0 * PI)) * self.spokes_per_revolution as f64)
+                let end_spoke = ((zone.end_angle / TAU) * self.spokes_per_revolution as f64)
                     as u16
                     % self.spokes_per_revolution;
 
@@ -327,7 +327,7 @@ impl BlobDetector {
             self.spokes_per_revolution - blob.min_spoke + blob.max_spoke + 1
         };
         let angular_extent =
-            avg_distance * (spoke_extent as f64 * 2.0 * PI / self.spokes_per_revolution as f64);
+            avg_distance * (spoke_extent as f64 * TAU / self.spokes_per_revolution as f64);
 
         // Use larger dimension as "size"
         radial_extent.max(angular_extent)

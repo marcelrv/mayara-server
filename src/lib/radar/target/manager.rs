@@ -3,7 +3,7 @@
 //! Manages target trackers based on merge mode (single shared tracker vs per-radar trackers).
 
 use std::collections::HashMap;
-use std::f64::consts::PI;
+use std::f64::consts::TAU;
 use std::time::{Duration, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
@@ -505,7 +505,7 @@ fn blob_to_position(blob: &CompletedBlob, ctx: &SpokeContext) -> Option<GeoPosit
         .rem_euclid(ctx.spokes_per_revolution as i32) as u16;
 
     // Convert true bearing from spokes to radians
-    let bearing_rad = (blob_true_bearing as f64 / ctx.spokes_per_revolution as f64) * 2.0 * PI;
+    let bearing_rad = (blob_true_bearing as f64 / ctx.spokes_per_revolution as f64) * TAU;
 
     // Calculate distance from pixel position
     let distance_m = if ctx.spoke_len > 0 {
@@ -530,7 +530,7 @@ fn active_target_to_api(
         let dist = (dlat * dlat + dlon * dlon).sqrt();
         let bearing = dlon.atan2(dlat);
         let bearing = if bearing < 0.0 {
-            bearing + 2.0 * PI
+            bearing + TAU
         } else {
             bearing
         };

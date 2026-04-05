@@ -1,4 +1,4 @@
-use std::f64::consts::PI;
+use std::f64::consts::TAU;
 
 use crate::{protos::RadarMessage::radar_message::Spoke, radar::SpokeBearing};
 
@@ -25,7 +25,7 @@ pub(crate) fn to_protobuf_spoke(
     } else {
         let heading = crate::navdata::get_heading_true();
         heading.map(|h| {
-            (((h * spokes_per_revolution as f64 / (2. * PI)) as u16 + angle)
+            (((h * spokes_per_revolution as f64 / TAU) as u16 + angle)
                 % spokes_per_revolution) as u32
         })
     };

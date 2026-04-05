@@ -4,7 +4,7 @@
 //! active (confirmed) and acquiring (potential) target lists.
 
 use std::collections::HashMap;
-use std::f64::consts::PI;
+use std::f64::consts::TAU;
 
 use super::motion::{ImmMotionModel, MotionModel};
 use super::{METERS_PER_DEGREE_LATITUDE, meters_per_degree_longitude};
@@ -664,7 +664,7 @@ fn calculate_bearing(p1: &GeoPosition, p2: &GeoPosition) -> f64 {
 
     let bearing = dlon.atan2(dlat);
     if bearing < 0.0 {
-        bearing + 2.0 * PI
+        bearing + TAU
     } else {
         bearing
     }
@@ -672,6 +672,8 @@ fn calculate_bearing(p1: &GeoPosition, p2: &GeoPosition) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::f64::consts::PI;
+
     use super::*;
 
     /// Default max speed for tests (50 knots)
@@ -1058,7 +1060,7 @@ mod tests {
 
         // Time for one full circle = 2π / angular_velocity ≈ 203 seconds
         // Time for 2 full circles ≈ 406 seconds
-        let circle_time_s = 2.0 * PI / angular_velocity;
+        let circle_time_s = TAU / angular_velocity;
 
         // Center of circle is 350m north of radar (at 52.0, 4.0)
         let radar_lat = 52.0;
@@ -1128,7 +1130,7 @@ mod tests {
 
         // With forced position override for fast targets, we should maintain tracking
         // through the entire test
-        let total_circles = (angular_velocity * num_revolutions as f64 * 3.0) / (2.0 * PI);
+        let total_circles = (angular_velocity * num_revolutions as f64 * 3.0) / TAU;
         println!(
             "Circling target: {} successful updates, {} lost, {:.1} full circles completed ({}s circle time, {} radar revs)",
             successful_updates, lost_count, total_circles, circle_time_s as i32, num_revolutions
@@ -1180,7 +1182,7 @@ mod tests {
 
         // Time for one full circle = 2π / angular_velocity ≈ 203 seconds
         // Time for 2 full circles ≈ 406 seconds
-        let circle_time_s = 2.0 * PI / angular_velocity;
+        let circle_time_s = TAU / angular_velocity;
 
         // Center of circle is 350m north of radar (at 52.0, 4.0)
         let radar_lat = 52.0;
@@ -1244,7 +1246,7 @@ mod tests {
             }
         }
 
-        let total_circles = (angular_velocity * num_revolutions as f64 * 3.0) / (2.0 * PI);
+        let total_circles = (angular_velocity * num_revolutions as f64 * 3.0) / TAU;
         println!(
             "IMM circling target: {} successful updates, {} lost, {:.1} full circles completed ({}s circle time, {} radar revs)",
             successful_updates, lost_count, total_circles, circle_time_s as i32, num_revolutions
@@ -1295,7 +1297,7 @@ mod tests {
         let speed_ms = speed_knots * 1852.0 / 3600.0; // ~7.72 m/s
         let angular_velocity = speed_ms / radius_m; // ~0.031 rad/s
 
-        let circle_time_s = 2.0 * PI / angular_velocity;
+        let circle_time_s = TAU / angular_velocity;
 
         let radar_lat = 52.0;
         let radar_lon = 4.0;
@@ -1363,7 +1365,7 @@ mod tests {
             }
         }
 
-        let total_circles = (angular_velocity * num_revolutions as f64 * 3.0) / (2.0 * PI);
+        let total_circles = (angular_velocity * num_revolutions as f64 * 3.0) / TAU;
         println!(
             "Circling outside guard zone: {} successful, {} lost, {:.1} circles ({}s circle, {} radar revs)",
             successful_updates, lost_count, total_circles, circle_time_s as i32, num_revolutions
@@ -1404,7 +1406,7 @@ mod tests {
         let speed_ms = speed_knots * 1852.0 / 3600.0; // ~7.72 m/s
         let angular_velocity = speed_ms / radius_m; // ~0.031 rad/s
 
-        let circle_time_s = 2.0 * PI / angular_velocity;
+        let circle_time_s = TAU / angular_velocity;
 
         let radar_lat = 52.0;
         let radar_lon = 4.0;
@@ -1478,7 +1480,7 @@ mod tests {
             }
         }
 
-        let total_circles = (angular_velocity * num_revolutions as f64 * 3.0) / (2.0 * PI);
+        let total_circles = (angular_velocity * num_revolutions as f64 * 3.0) / TAU;
         println!(
             "MARPA circling target: {} successful, {} lost, {:.1} circles ({}s circle, {} radar revs)",
             successful_updates, lost_count, total_circles, circle_time_s as i32, num_revolutions

@@ -1418,6 +1418,17 @@ impl CommonRadar {
                 }
             }
 
+            // Extract heading from spoke data and broadcast for GUI
+            if let Some(bearing) = spoke.bearing {
+                let heading_spokes = (bearing as i32 - spoke.angle as i32)
+                    .rem_euclid(self.info.spokes_per_revolution as i32)
+                    as f64;
+                let heading_rad = heading_spokes
+                    / self.info.spokes_per_revolution as f64
+                    * std::f64::consts::TAU;
+                crate::navdata::set_heading_true(Some(heading_rad), &self.key);
+            }
+
             // Always broadcast spoke to clients
             let mut spoke = spoke;
             self.trails

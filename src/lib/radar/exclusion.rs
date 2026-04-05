@@ -3,7 +3,7 @@
 //! Exclusion zones are areas where radar returns are suppressed (set to transparent).
 //! The mask is precomputed when the range changes to ensure O(1) lookup during spoke processing.
 
-use std::f64::consts::PI;
+use std::f64::consts::TAU;
 
 use crate::config::{ExclusionRect, ExclusionZone};
 
@@ -156,7 +156,7 @@ impl ExclusionMask {
 
             for spoke in 0..spokes {
                 // Ray direction for this spoke (0 = north, increasing clockwise)
-                let angle = (spoke as f64 / spokes as f64) * 2.0 * PI;
+                let angle = (spoke as f64 / spokes as f64) * TAU;
                 let ray_dx = angle.sin(); // x component (east)
                 let ray_dy = angle.cos(); // y component (north)
 
@@ -250,10 +250,10 @@ pub fn zone_to_internal(
     let meters_per_pixel = range_meters as f64 / spoke_len as f64;
 
     // Convert angles from radians to spokes
-    let start_spoke = ((zone.start_angle / (2.0 * PI)) * spokes_per_revolution as f64) as i32;
+    let start_spoke = ((zone.start_angle / TAU) * spokes_per_revolution as f64) as i32;
     let start_spoke = start_spoke.rem_euclid(spokes_per_revolution as i32) as u16;
 
-    let end_spoke = ((zone.end_angle / (2.0 * PI)) * spokes_per_revolution as f64) as i32;
+    let end_spoke = ((zone.end_angle / TAU) * spokes_per_revolution as f64) as i32;
     let end_spoke = end_spoke.rem_euclid(spokes_per_revolution as i32) as u16;
 
     // Convert distances from meters to pixels
@@ -281,6 +281,8 @@ pub fn rect_to_internal(rect: &ExclusionRect) -> ExclusionRectInternal {
 
 #[cfg(test)]
 mod tests {
+    use std::f64::consts::PI;
+
     use super::*;
 
     #[test]

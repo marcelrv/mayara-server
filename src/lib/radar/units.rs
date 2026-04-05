@@ -1,5 +1,5 @@
 use serde_string_enum::{DeserializeLabeledStringEnum, SerializeLabeledStringEnum};
-use std::f64::consts::PI;
+use std::f64::consts::{PI, TAU};
 use utoipa::ToSchema;
 
 #[derive(
@@ -54,7 +54,7 @@ impl Units {
             Units::None => unreachable!("Units::None"),
             Units::Radians => (Units::Radians, 1.),
             Units::RadiansPerSecond => (Units::RadiansPerSecond, 1.),
-            Units::RotationsPerMinute => (Units::RotationsPerMinute, (2. * PI) / 60.),
+            Units::RotationsPerMinute => (Units::RotationsPerMinute, TAU / 60.),
             Units::Seconds => (Units::Seconds, 1.),
         };
         (units, value * factor)
@@ -73,7 +73,7 @@ impl Units {
             Units::None => unreachable!("Units::None"),
             Units::Radians => 1.,
             Units::RadiansPerSecond => 1.,
-            Units::RotationsPerMinute => 60. / (2. * PI),
+            Units::RotationsPerMinute => 60. / TAU,
             Units::Seconds => 1.,
         };
 

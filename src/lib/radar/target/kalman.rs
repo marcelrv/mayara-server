@@ -245,7 +245,7 @@ impl KalmanFilter {
         let cog = lon_vel_ms.atan2(lat_vel_ms);
         // Normalize to [0, 2π)
         let cog = if cog < 0.0 {
-            cog + 2.0 * std::f64::consts::PI
+            cog + std::f64::consts::TAU
         } else {
             cog
         };
@@ -378,7 +378,7 @@ mod tests {
 
         // COG should be approximately 0 (north)
         assert!(
-            cog.abs() < 0.2 || (cog - 2.0 * std::f64::consts::PI).abs() < 0.2,
+            cog.abs() < 0.2 || (cog - std::f64::consts::TAU).abs() < 0.2,
             "COG should be north: {}",
             cog
         );

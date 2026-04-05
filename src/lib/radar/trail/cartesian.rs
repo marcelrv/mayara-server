@@ -27,9 +27,9 @@ impl PolarToCartesianLookup {
         let mut xyi = Vec::with_capacity(spokes_per_revolution * spoke_len);
         for arc in 0..spokes_per_revolution {
             let sine =
-                (arc as f64 * 2.0 * std::f64::consts::PI / spokes_per_revolution as f64).sin();
+                (arc as f64 * std::f64::consts::TAU / spokes_per_revolution as f64).sin();
             let cosine =
-                (arc as f64 * 2.0 * std::f64::consts::PI / spokes_per_revolution as f64).cos();
+                (arc as f64 * std::f64::consts::TAU / spokes_per_revolution as f64).cos();
             for radius in 0..spoke_len {
                 let x = radius as f64 * cosine;
                 let y = radius as f64 * sine;

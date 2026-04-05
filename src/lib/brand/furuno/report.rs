@@ -1,6 +1,6 @@
 use anyhow::{Context, Error, bail};
 use num_traits::FromPrimitive;
-use std::f64::consts::PI;
+use std::f64::consts::TAU;
 use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -939,7 +939,7 @@ impl FurunoReportReceiver {
             Some(heading as u16)
         } else {
             let heading = crate::navdata::get_heading_true();
-            heading.map(|h| (h * FURUNO_SPOKES as f64 / (2. * PI)) as u16)
+            heading.map(|h| (h * FURUNO_SPOKES as f64 / TAU) as u16)
         };
 
         let mut data = vec![0; sweep.len()];

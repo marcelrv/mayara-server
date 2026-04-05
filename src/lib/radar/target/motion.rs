@@ -4,7 +4,7 @@
 //! target motion estimation, combining constant velocity, constant acceleration,
 //! and coordinated turn models.
 
-use std::f64::consts::PI;
+use std::f64::consts::TAU;
 
 use super::kalman::KalmanFilter;
 use crate::radar::GeoPosition;
@@ -128,7 +128,7 @@ impl ImmMotionModel {
         // Gaussian likelihood
         let sigma = uncertainty.max(1.0);
         let exponent = -0.5 * (distance / sigma).powi(2);
-        exponent.exp() / (sigma * (2.0 * PI).sqrt())
+        exponent.exp() / (sigma * TAU.sqrt())
     }
 
     /// Mix model states based on mixing probabilities
@@ -209,7 +209,7 @@ impl ImmMotionModel {
 
         self.cog = sin_sum.atan2(cos_sum);
         if self.cog < 0.0 {
-            self.cog += 2.0 * PI;
+            self.cog += TAU;
         }
     }
 }
@@ -369,6 +369,8 @@ fn calculate_distance(from: &GeoPosition, to: &GeoPosition) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::f64::consts::PI;
+
     use super::*;
 
     #[test]
@@ -442,7 +444,7 @@ mod tests {
         let angular_velocity = speed_ms / radius_m; // ~0.031 rad/s
 
         // Time for one full circle = 2π / angular_velocity ≈ 203 seconds
-        let circle_time_s = 2.0 * PI / angular_velocity;
+        let circle_time_s = TAU / angular_velocity;
 
         // Center of circle
         let center_lat = 52.0 + 350.0 / super::super::METERS_PER_DEGREE_LATITUDE;
@@ -492,7 +494,7 @@ mod tests {
         }
 
         let avg_prediction_error = total_prediction_error / prediction_count as f64;
-        let total_circles = (angular_velocity * num_revolutions as f64 * 3.0) / (2.0 * PI);
+        let total_circles = (angular_velocity * num_revolutions as f64 * 3.0) / TAU;
 
         println!(
             "IMM continuous circling: {:.1} circles, avg error={:.1}m, max error={:.1}m, CT prob={:.2}",
