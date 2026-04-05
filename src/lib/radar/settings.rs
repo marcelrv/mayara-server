@@ -1472,6 +1472,13 @@ impl SharedControls {
     }
 
     /// Returns the current ARPA max speed setting: 0 = Normal (25kn), 1 = Medium (40kn), 2 = Fast (50kn)
+    pub fn doppler_auto_track(&self) -> bool {
+        self.get(&ControlId::DopplerAutoTrack)
+            .and_then(|c| c.value)
+            .map(|v| v != 0.0)
+            .unwrap_or(false)
+    }
+
     pub fn arpa_detect_max_speed(&self) -> i32 {
         self.get(&ControlId::ArpaDetectMaxSpeed)
             .and_then(|c| c.value)
@@ -1483,6 +1490,13 @@ impl SharedControls {
         let mut locked = self.controls.write().unwrap();
         if let Some(control) = locked.controls.get_mut(&ControlId::ArpaDetectMaxSpeed) {
             let _ = control.set(value as f64, None, None, None);
+        }
+    }
+
+    pub fn set_doppler_auto_track(&self, value: bool) {
+        let mut locked = self.controls.write().unwrap();
+        if let Some(control) = locked.controls.get_mut(&ControlId::DopplerAutoTrack) {
+            let _ = control.set(if value { 1.0 } else { 0.0 }, None, None, None);
         }
     }
 

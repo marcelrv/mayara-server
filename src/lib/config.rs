@@ -90,6 +90,8 @@ pub struct Radar {
     // ARPA/Target tracking settings
     #[serde(default)]
     pub arpa_max_speed: i32, // 0 = Normal (25kn), 1 = Medium (40kn), 2 = Fast (50kn)
+    #[serde(default)]
+    pub doppler_auto_track: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -331,6 +333,12 @@ impl Persistence {
             modified = true;
         }
 
+        let doppler_auto_track = radar_info.controls.doppler_auto_track();
+        if radar.doppler_auto_track != doppler_auto_track {
+            radar.doppler_auto_track = doppler_auto_track;
+            modified = true;
+        }
+
         if modified {
             self.save();
         }
@@ -389,6 +397,7 @@ impl Persistence {
                     .set_exclusion_rect(&ControlId::ExclusionRect4, rect);
             }
             info.controls.set_arpa_max_speed(p.arpa_max_speed);
+            info.controls.set_doppler_auto_track(p.doppler_auto_track);
         }
     }
 }
