@@ -9,7 +9,7 @@
 //! - DopplerAutoTrack (automatic acquisition of Doppler-colored targets)
 
 use std::collections::HashMap;
-use std::f64::consts::PI;
+use std::f64::consts::TAU;
 
 use crate::config::GuardZone;
 use crate::protos::RadarMessage::radar_message::Spoke;
