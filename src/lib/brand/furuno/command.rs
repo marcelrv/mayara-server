@@ -201,6 +201,9 @@ pub(crate) struct Command {
     write: Option<WriteHalf<TcpStream>>,
     controls: SharedControls,
     ranges: Ranges,
+    /// Dual range ID appended to per-range commands (0 = Range A, 1 = Range B).
+    /// Set by the receiver before each set_control call to target the correct range.
+    pub dual_range_id: i32,
 }
 
 impl Command {
@@ -210,6 +213,7 @@ impl Command {
             write: None,
             controls: info.controls.clone(),
             ranges: info.ranges.clone(),
+            dual_range_id: 0,
         }
     }
 
@@ -416,7 +420,7 @@ impl CommandSender for Command {
                 let wire_index = meters_to_wire_index_for_unit(value, wire_unit);
                 cmd.push(wire_index);
                 cmd.push(wire_unit);
-                cmd.push(0); // dual_range_id
+                cmd.push(self.dual_range_id);
                 CommandId::Range
             }
 
@@ -438,40 +442,37 @@ impl CommandSender for Command {
                 let wire_index = meters_to_wire_index_for_unit(current_range, wire_unit);
                 cmd.push(wire_index);
                 cmd.push(wire_unit);
-                cmd.push(0); // dual_range_id
+                cmd.push(self.dual_range_id);
                 CommandId::Range
             }
 
             ControlId::Gain => {
-                // Format: $S63,{auto},{value},0,80,0
-                // From pcap: $S63,0,50,0,80,0 (manual, value=50)
+                // Per-range: $S63,{auto},{value},0,80,{dual_range_id}
                 cmd.push(auto);
                 cmd.push(value);
                 cmd.push(0);
                 cmd.push(80);
-                cmd.push(0);
+                cmd.push(self.dual_range_id);
                 CommandId::Gain
             }
             ControlId::Sea => {
-                // Format: $S64,{auto},{value},50,0,0,0
-                // From pcap: $S64,{auto},{value},50,0,0,0
+                // Per-range: $S64,{auto},{value},50,0,0,{dual_range_id}
                 cmd.push(auto);
                 cmd.push(value);
                 cmd.push(50);
                 cmd.push(0);
                 cmd.push(0);
-                cmd.push(0);
+                cmd.push(self.dual_range_id);
                 CommandId::Sea
             }
             ControlId::Rain => {
-                // Format: $S65,{auto},{value},0,0,0,0
-                // From pcap: $S65,{auto},{value},0,0,0,0
+                // Per-range: $S65,{auto},{value},0,0,0,{dual_range_id}
                 cmd.push(auto);
                 cmd.push(value);
                 cmd.push(0);
                 cmd.push(0);
                 cmd.push(0);
-                cmd.push(0);
+                cmd.push(self.dual_range_id);
                 CommandId::Rain
             }
 

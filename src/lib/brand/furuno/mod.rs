@@ -84,6 +84,7 @@ impl From<u8> for CommandMode {
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Copy)]
 enum RadarModel {
     Unknown,
     FAR21x7,
@@ -234,7 +235,13 @@ impl FurunoLocator {
         }
     }
 
-    fn found(&self, info: RadarInfo, radars: &SharedRadars, subsys: &SubsystemHandle) {
+    fn found(
+        &self,
+        info: RadarInfo,
+        info_b: Option<RadarInfo>,
+        radars: &SharedRadars,
+        subsys: &SubsystemHandle,
+    ) {
         if let Some(mut info) = radars.add(info) {
             // It's new, start the RadarProcessor thread
 
@@ -274,8 +281,25 @@ impl FurunoLocator {
                 radars.update(&mut info);
             }
 
-            let report_receiver =
+            // Register and configure Range B if this is a dual-range model
+            let mut info_b = info_b.and_then(|ib| radars.add(ib));
+            if let Some(ref mut ib) = info_b {
+                ib.send_command_addr.set_port(port);
+                ib.report_addr.set_port(port);
+                ib.start_forwarding_radar_messages_to_stdout(&subsys);
+                if self.args.replay {
+                    let model = RadarModel::DRS4DNXT;
+                    let version = "01.05";
+                    settings::update_when_model_known(ib, model, version);
+                    radars.update(ib);
+                }
+            }
+
+            let mut report_receiver =
                 report::FurunoReportReceiver::new(&self.args, radars.clone(), info);
+            if let Some(ib) = info_b {
+                report_receiver.set_range_b(&self.args, radars, ib);
+            }
             subsys.start(SubsystemBuilder::new(report_name, |s| {
                 report_receiver.run(s)
             }));
@@ -394,12 +418,18 @@ impl FurunoLocator {
 
                 let report_addr: SocketAddrV4 = SocketAddrV4::new(*from.ip(), 0); // Port is set in login_to_radar
                 let send_command_addr: SocketAddrV4 = report_addr.clone();
+
+                // NXT models support dual range
+                let is_dual_range = model.contains("NXT");
+
+                // Range A (or only range for non-dual models)
+                let dual_suffix = if is_dual_range { Some("A") } else { None };
                 let radar_info = RadarInfo::new(
                     radars,
                     &self.args,
                     Brand::Furuno,
                     serial_no,
-                    None, // No A or B after fur<serialno>,
+                    dual_suffix,
                     64,
                     FURUNO_SPOKES,
                     FURUNO_SPOKE_LEN,
@@ -422,7 +452,39 @@ impl FurunoLocator {
                 // Furuno radars report more spokes than they send, default to "Reduce" mode (2)
                 radar_info.controls.set_spoke_processing(2);
 
-                self.found(radar_info, radars, subsys);
+                // Range B for dual-range NXT models
+                let info_b = if is_dual_range {
+                    let info_b = RadarInfo::new(
+                        radars,
+                        &self.args,
+                        Brand::Furuno,
+                        serial_no,
+                        Some("B"),
+                        64,
+                        FURUNO_SPOKES,
+                        FURUNO_SPOKE_LEN,
+                        *from,
+                        nic_addr.clone(),
+                        spoke_data_addr,
+                        report_addr,
+                        send_command_addr,
+                        |id, tx| settings::new(id, tx, &self.args),
+                        true,
+                        true,
+                    );
+                    info_b.controls.set_model_name(format!("{} B", model));
+                    info_b.controls.set_user_name(
+                        format!("{model} {} B", serial_no.unwrap_or(""))
+                            .trim()
+                            .to_string(),
+                    );
+                    info_b.controls.set_spoke_processing(2);
+                    Some(info_b)
+                } else {
+                    None
+                };
+
+                self.found(radar_info, info_b, radars, subsys);
             }
             Err(e) => {
                 log::error!(

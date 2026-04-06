@@ -40,10 +40,13 @@ struct FurunoSpokeMetadata {
     encoding: u8,
     have_heading: u8,
     range: u32,
+    radar_no: u8, // 0 = Range A, 1 = Range B (dual range)
 }
 
 pub struct FurunoReportReceiver {
     common: CommonRadar,
+    /// Second CommonRadar for Range B in dual range mode.
+    common_b: Option<CommonRadar>,
     stream: Option<TcpStream>,
     command_sender: Option<Command>,
     report_request_interval: Duration,
@@ -53,7 +56,6 @@ pub struct FurunoReportReceiver {
     multicast_socket: Option<UdpSocket>,
     broadcast_socket: Option<UdpSocket>,
 
-    // pixel_to_blob: [[u8; BYTE_LOOKUP_LENGTH]; LOOKUP_SPOKE_LENGTH],
     prev_spoke: Vec<u8>,
     prev_angle: u16,
 }
@@ -70,8 +72,6 @@ impl FurunoReportReceiver {
         let control_update_rx = info.control_update_subscribe();
         let blob_tx = radars.get_blob_tx();
 
-        // let pixel_to_blob = Self::pixel_to_blob(&info.legend);
-
         let common = CommonRadar::new(
             args,
             key,
@@ -84,6 +84,7 @@ impl FurunoReportReceiver {
 
         FurunoReportReceiver {
             common,
+            common_b: None,
             stream: None,
             command_sender,
             report_request_interval: Duration::from_millis(5000),
@@ -94,6 +95,23 @@ impl FurunoReportReceiver {
             prev_spoke: Vec::new(),
             prev_angle: 0,
         }
+    }
+
+    /// Set the Range B RadarInfo for dual range mode.
+    pub fn set_range_b(&mut self, args: &Cli, radars: &SharedRadars, info_b: RadarInfo) {
+        let key_b = info_b.key();
+        let control_update_rx_b = info_b.control_update_subscribe();
+        let blob_tx_b = radars.get_blob_tx();
+
+        self.common_b = Some(CommonRadar::new(
+            args,
+            key_b,
+            info_b,
+            radars.clone(),
+            control_update_rx_b,
+            args.replay,
+            blob_tx_b,
+        ));
     }
 
     async fn start_command_stream(&mut self) -> Result<(), RadarError> {
@@ -185,8 +203,35 @@ impl FurunoReportReceiver {
                     match r {
                         Err(_) => {},
                         Ok(cv) => {
+                            // Range A control update: set dual_range_id=0
+                            if let Some(ref mut cs) = self.command_sender {
+                                cs.dual_range_id = 0;
+                            }
                             if let Err(e) = self.common.process_control_update( cv, &mut self.command_sender).await {
                                 return Err(e);
+                            }
+                        },
+                    }
+                },
+
+                Some(r) = async {
+                    if let Some(ref mut cb) = self.common_b {
+                        Some(cb.control_update_rx.recv().await)
+                    } else {
+                        std::future::pending::<Option<_>>().await
+                    }
+                } => {
+                    match r {
+                        Err(_) => {},
+                        Ok(cv) => {
+                            // Range B control update: set dual_range_id=1
+                            if let Some(ref mut cs) = self.command_sender {
+                                cs.dual_range_id = 1;
+                            }
+                            if let Some(ref mut cb) = self.common_b {
+                                if let Err(e) = cb.process_control_update(cv, &mut self.command_sender).await {
+                                    return Err(e);
+                                }
                             }
                         },
                     }
@@ -627,6 +672,12 @@ impl FurunoReportReceiver {
                 cs.set_ranges(self.common.info.ranges.clone());
             }
             self.common.update();
+
+            // Also update Range B if present
+            if let Some(ref mut cb) = self.common_b {
+                settings::update_when_model_known(&mut cb.info, model, version);
+                cb.update();
+            }
             return;
         }
         log::error!(
@@ -766,9 +817,15 @@ impl FurunoReportReceiver {
 
         let sweep_count = metadata.sweep_count;
         let sweep_len = metadata.sweep_len as usize;
-        log::debug!("Received UDP frame with {} spokes", sweep_count,);
+        let is_range_b = metadata.radar_no == 1 && self.common_b.is_some();
 
-        self.common.new_spoke_message();
+        log::debug!("Received UDP frame with {} spokes (range {})", sweep_count, if is_range_b { "B" } else { "A" });
+
+        if is_range_b {
+            self.common_b.as_mut().unwrap().new_spoke_message();
+        } else {
+            self.common.new_spoke_message();
+        }
 
         let mut sweep: &[u8] = &data[16..];
         for sweep_idx in 0..sweep_count {
@@ -797,13 +854,21 @@ impl FurunoReportReceiver {
             };
             sweep = &sweep[used..];
 
-            self.add_spoke_to_message(&metadata, angle, heading, &generic_spoke);
+            if is_range_b {
+                Self::add_spoke_to_common(self.common_b.as_mut().unwrap(), &metadata, angle, heading, &generic_spoke);
+            } else {
+                Self::add_spoke_to_common(&mut self.common, &metadata, angle, heading, &generic_spoke);
+            }
 
             self.prev_angle = angle;
             self.prev_spoke = generic_spoke;
         }
 
-        self.common.send_spoke_message();
+        if is_range_b {
+            self.common_b.as_mut().unwrap().send_spoke_message();
+        } else {
+            self.common.send_spoke_message();
+        }
     }
 
     fn decode_sweep_encoding_0(sweep: &[u8]) -> (Vec<u8>, usize) {
@@ -916,26 +981,24 @@ impl FurunoReportReceiver {
         (spoke, used)
     }
 
-    fn add_spoke_to_message(
-        &mut self,
+    fn add_spoke_to_common(
+        common: &mut CommonRadar,
         metadata: &FurunoSpokeMetadata,
         angle: SpokeBearing,
         heading: SpokeBearing,
         sweep: &[u8],
     ) {
-        if self.common.replay {
-            let _ = self
-                .common
+        if common.replay {
+            let _ = common
                 .info
                 .controls
                 .set(&ControlId::Range, metadata.range as f64, None);
-            let _ = self.common.info.controls.set(
+            let _ = common.info.controls.set(
                 &ControlId::Power,
                 Power::Transmit as u32 as f64,
                 None,
             );
         }
-        // Convert the spoke data to bytes
 
         let heading: Option<u16> = if metadata.have_heading > 0 {
             Some(heading as u16)
@@ -951,7 +1014,7 @@ impl FurunoReportReceiver {
             data[i] = b >> 2;
             i += 1;
         }
-        if self.common.replay {
+        if common.replay {
             data[sweep.len() - 1] = 64;
         }
 
@@ -962,7 +1025,7 @@ impl FurunoReportReceiver {
             PrintableSpoke::new(&data)
         );
 
-        self.common.add_spoke(metadata.range, angle, heading, data);
+        common.add_spoke(metadata.range, angle, heading, data);
     }
 
     // From RadarDLLAccess RmGetEchoData() we know that the following should be in the header:
@@ -1005,6 +1068,9 @@ impl FurunoReportReceiver {
         // CRITICAL: data[12] is a WIRE INDEX (non-sequential: 21, 0-15, 19)
         // NOT an array position! Must convert to meters.
         let wire_index = data[12] as i32;
+        // data[13]: radar number for dual range (0 = Range A, 1 = Range B)
+        // For non-dual-range radars this is always 0.
+        let radar_no = data[13];
         let have_heading = ((data[15] & 0x30) >> 3) as u8;
 
         // Now do stuff with the data
@@ -1023,15 +1089,17 @@ impl FurunoReportReceiver {
             encoding,
             have_heading,
             range,
+            radar_no,
         };
         log::trace!(
-            "header {:?} -> v1={v1}, v2={v2}, v3={v3}, sweep_count={} sweep_len={} encoding={} have_heading={} range={}",
+            "header {:?} -> v1={v1}, v2={v2}, v3={v3}, sweep_count={} sweep_len={} encoding={} have_heading={} range={} radar_no={}",
             &data[0..20],
             sweep_count,
             sweep_len,
             encoding,
             have_heading,
-            range
+            range,
+            radar_no,
         );
 
         metadata

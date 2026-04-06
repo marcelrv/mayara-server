@@ -41,10 +41,13 @@ Each UDP frame has a 16-byte metadata header. Based on the TimeZero `RadarSweepM
 struct and the native DLL callback signature, each frame carries a `radarNo` field (0 or 1)
 that identifies which range the spokes belong to.
 
-In our current `parse_metadata_header()`, the header fields `v2` and `v3` (extracted from
-`data[11]` bits 5-7) are not yet identified. One of these likely carries the range ID, or it
-may be in a currently-unexamined byte (e.g., `data[13]` or `data[14]`). A pcap capture from
-a DRS-NXT operating in dual range mode is needed to confirm the exact byte position.
+In the native DLL, `radarNo` is delivered as a separate field in `RadarSweepMetadata`
+(struct order: angle, heading, headingFlag, **radarNo**, range, scale, sweepLength, status)
+and as the first parameter of the echo callback. The DLL must extract this from the raw UDP
+frame to populate it. In our `parse_metadata_header()`, `data[12]` is the wire_index (range)
+and `data[13]` is unexamined — this is the most likely position for the range identifier
+(radarNo), since it sits adjacent to the range field and would be 0 for all non-dual-range
+radars. A pcap capture from a DRS-NXT in dual range mode would confirm this.
 
 ### Reports (TCP)
 
@@ -170,22 +173,12 @@ byte and route `radarNo=0` frames to `common_a` and `radarNo=1` frames to `commo
 
 ### Discovery Changes
 
-The `FurunoLocator` needs to create two `RadarInfo` instances when a dual-range-capable
-model is detected:
-
-```rust
-// Range A
-let info_a = RadarInfo::new(radars, args, Brand::Furuno, serial_no,
-    Some("A"), ...);
-
-// Range B — same addresses, same serial, different dual suffix
-let info_b = RadarInfo::new(radars, args, Brand::Furuno, serial_no,
-    Some("B"), ...);
-```
-
-The `FurunoReportReceiver` is then constructed with both `RadarInfo` instances.
+The `FurunoLocator` creates two `RadarInfo` instances when the model name contains "NXT".
+The `FurunoReportReceiver` is constructed with both and uses `set_range_b()` to install
+the second `CommonRadar`.
 
 ### Non-Dual-Range Radars
 
 For models that don't support dual range (DRS4DL, FAR series, etc.), the architecture
 remains unchanged: single `RadarInfo`, single `CommonRadar`, `dual_range_id` always 0.
+The `common_b` field is `None`.
