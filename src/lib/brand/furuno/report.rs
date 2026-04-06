@@ -467,16 +467,18 @@ impl FurunoReportReceiver {
                 }
                 // CRITICAL: numbers[0] is a WIRE INDEX (non-sequential: 21, 0-15, 19)
                 // NOT an array position! Must convert to meters first.
-                // numbers[2] is the display unit (0=NM, 1=km, 2=sm) but the wire
-                // index maps to meters regardless of display unit.
+                // numbers[2] is the display unit (0=NM, 1=km, 2=sm) — determines
+                // which wire index table to use for meters conversion.
                 let wire_index = numbers[0] as i32;
+                let wire_unit = numbers[2] as i32;
                 let range_meters =
-                    super::command::wire_index_to_meters(wire_index).with_context(|| {
-                        format!(
-                            "Unknown wire index {} from radar range response",
-                            wire_index
-                        )
-                    })?;
+                    super::command::wire_index_to_meters_for_unit(wire_index, wire_unit)
+                        .with_context(|| {
+                            format!(
+                                "Unknown wire index {} (unit {}) from radar range response",
+                                wire_index, wire_unit
+                            )
+                        })?;
 
                 self.common
                     .set_value(&ControlId::Range, range_meters as f64);

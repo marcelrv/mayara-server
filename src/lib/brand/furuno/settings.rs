@@ -39,7 +39,8 @@ pub fn new(
     new_list(ControlId::ScanSpeed, &["Normal", "Fast", "Auto"]).build(&mut controls);
     new_numeric(ControlId::MainBangSuppression, 0., 100.).build(&mut controls);
 
-    // Furuno is nautical-only - no RangeUnits control, default is already 0 (Nautical)
+    new_list(ControlId::RangeUnits, &["Nautical", "Metric"]).build(&mut controls);
+
     SharedControls::new(radar_id, sk_client_tx, args, controls)
 }
 
@@ -169,6 +170,100 @@ static RANGE_TABLE_DRS_NXT_EXTENDED: &[i32] = &[
     177792, // 96 NM
 ];
 
+/// Range table for DRS-NXT series in km mode (in meters)
+/// Ranges: 0.125, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32, 36, 48, 64 km
+/// Note: 0.0625 km is NOT available in km mode for DRS4D-NXT
+static RANGE_TABLE_DRS_NXT_KM: &[i32] = &[
+    125,   // 0.125 km
+    250,   // 0.25 km
+    500,   // 0.5 km
+    750,   // 0.75 km
+    1000,  // 1 km
+    1500,  // 1.5 km
+    2000,  // 2 km
+    3000,  // 3 km
+    4000,  // 4 km
+    6000,  // 6 km
+    8000,  // 8 km
+    12000, // 12 km
+    16000, // 16 km
+    24000, // 24 km
+    32000, // 32 km
+    36000, // 36 km
+    48000, // 48 km
+    64000, // 64 km
+];
+
+/// Extended km range table for DRS12A/DRS25A-NXT (adds 72, 96 km)
+static RANGE_TABLE_DRS_NXT_EXTENDED_KM: &[i32] = &[
+    125,   // 0.125 km
+    250,   // 0.25 km
+    500,   // 0.5 km
+    750,   // 0.75 km
+    1000,  // 1 km
+    1500,  // 1.5 km
+    2000,  // 2 km
+    3000,  // 3 km
+    4000,  // 4 km
+    6000,  // 6 km
+    8000,  // 8 km
+    12000, // 12 km
+    16000, // 16 km
+    24000, // 24 km
+    32000, // 32 km
+    36000, // 36 km
+    48000, // 48 km
+    64000, // 64 km
+    72000, // 72 km
+    96000, // 96 km
+];
+
+/// Range table for standard DRS series in km mode (up to 36 km)
+static RANGE_TABLE_DRS_KM: &[i32] = &[
+    125,   // 0.125 km
+    250,   // 0.25 km
+    500,   // 0.5 km
+    750,   // 0.75 km
+    1000,  // 1 km
+    1500,  // 1.5 km
+    2000,  // 2 km
+    3000,  // 3 km
+    4000,  // 4 km
+    6000,  // 6 km
+    8000,  // 8 km
+    12000, // 12 km
+    16000, // 16 km
+    24000, // 24 km
+    32000, // 32 km
+    36000, // 36 km
+    48000, // 48 km
+    64000, // 64 km
+    72000, // 72 km
+    96000, // 96 km
+];
+
+/// Range table for FAR series in km mode
+/// Missing: 0.0625km, 36km, 64km, 72km (same gaps as NM mode)
+static RANGE_TABLE_FAR_KM: &[i32] = &[
+    125,   // 0.125 km
+    250,   // 0.25 km
+    500,   // 0.5 km
+    750,   // 0.75 km
+    1000,  // 1 km
+    1500,  // 1.5 km
+    2000,  // 2 km
+    3000,  // 3 km
+    4000,  // 4 km
+    6000,  // 6 km
+    8000,  // 8 km
+    12000, // 12 km
+    16000, // 16 km
+    24000, // 24 km
+    32000, // 32 km
+    48000, // 48 km
+    96000, // 96 km
+];
+
 /// Range table for standard DRS series (non-NXT, up to 36 NM)
 static RANGE_TABLE_DRS: &[i32] = &[
     116,   // 1/16 NM
@@ -211,36 +306,44 @@ static RANGE_TABLE_FAR: &[i32] = &[
     177792, // 96 NM
 ];
 
-/// Get the range table for a specific model
+/// Get the combined NM + km range table for a specific model.
+/// Both unit modes are included so the Ranges struct can auto-classify
+/// them into nautical/metric lists for RangeUnits filtering.
 fn get_ranges_by_model(model: &RadarModel) -> Vec<i32> {
-    let range_table: &[i32] = match model {
+    let (nm_table, km_table): (&[i32], &[i32]) = match model {
         // DRS-NXT series with extended ranges
-        RadarModel::DRS12ANXT | RadarModel::DRS25ANXT => RANGE_TABLE_DRS_NXT_EXTENDED,
+        RadarModel::DRS12ANXT | RadarModel::DRS25ANXT => {
+            (RANGE_TABLE_DRS_NXT_EXTENDED, RANGE_TABLE_DRS_NXT_EXTENDED_KM)
+        }
 
         // DRS-NXT series (standard)
-        RadarModel::DRS4DNXT | RadarModel::DRS6ANXT => RANGE_TABLE_DRS_NXT,
+        RadarModel::DRS4DNXT | RadarModel::DRS6ANXT => {
+            (RANGE_TABLE_DRS_NXT, RANGE_TABLE_DRS_NXT_KM)
+        }
 
         // FAR series (commercial radars)
         RadarModel::FAR21x7
         | RadarModel::FAR3000
         | RadarModel::FAR15x3
         | RadarModel::FAR14x6
-        | RadarModel::FAR14x7 => RANGE_TABLE_FAR,
+        | RadarModel::FAR14x7 => (RANGE_TABLE_FAR, RANGE_TABLE_FAR_KM),
 
         // Standard DRS series and unknown models
         RadarModel::Unknown
         | RadarModel::DRS
         | RadarModel::DRS4DL
         | RadarModel::DRS4W
-        | RadarModel::DRS6AXCLASS => RANGE_TABLE_DRS,
+        | RadarModel::DRS6AXCLASS => (RANGE_TABLE_DRS, RANGE_TABLE_DRS_KM),
     };
 
-    let ranges: Vec<i32> = range_table.to_vec();
+    let mut ranges: Vec<i32> = Vec::with_capacity(nm_table.len() + km_table.len());
+    ranges.extend_from_slice(nm_table);
+    ranges.extend_from_slice(km_table);
     log::debug!(
-        "Model {} supports {} ranges: {:?}",
+        "Model {} supports {} NM + {} km ranges",
         model,
-        ranges.len(),
-        ranges
+        nm_table.len(),
+        km_table.len(),
     );
     ranges
 }

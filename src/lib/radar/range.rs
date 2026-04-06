@@ -109,6 +109,11 @@ impl Range {
         return a % b == 0 || a % b == 1 || a % b == b - 1;
     }
 
+    /// Check if a distance value (in meters) looks like a metric (km-based) range
+    pub fn is_metric_distance(v: i32) -> bool {
+        Self::metric(v)
+    }
+
     fn metric(v: i32) -> bool {
         if v <= 100 {
             Self::near(v, 25)

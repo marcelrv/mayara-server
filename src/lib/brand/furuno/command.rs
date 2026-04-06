@@ -58,58 +58,142 @@ pub(crate) enum CommandId {
     RangeSelect = 0xFE,
 }
 
-/// Furuno wire index to meters mapping table
+/// Furuno wire index to meters mapping table (NM mode, wire unit 0)
 /// CRITICAL: Wire indices are NON-SEQUENTIAL! The radar uses specific wire index values.
 /// Verified via Wireshark captures from TimeZero ↔ DRS4D-NXT
 ///
 /// Example: To set 1/16nm range, you send wire_index=21 (NOT 0!)
 ///          To set 36nm range, you send wire_index=19 (NOT 16!)
-pub const WIRE_INDEX_TABLE: [(i32, i32); 18] = [
-    (21, 116),   // 1/16 nm = 116m (minimum range) - wire index 21!
-    (0, 231),    // 1/8 nm = 231m
-    (1, 463),    // 1/4 nm = 463m
-    (2, 926),    // 1/2 nm = 926m
-    (3, 1389),   // 3/4 nm = 1389m
-    (4, 1852),   // 1 nm = 1852m
-    (5, 2778),   // 1.5 nm = 2778m
-    (6, 3704),   // 2 nm = 3704m
-    (7, 5556),   // 3 nm = 5556m
-    (8, 7408),   // 4 nm = 7408m
-    (9, 11112),  // 6 nm = 11112m
-    (10, 14816), // 8 nm = 14816m
-    (11, 22224), // 12 nm = 22224m
-    (12, 29632), // 16 nm = 29632m
-    (13, 44448), // 24 nm = 44448m
-    (14, 59264), // 32 nm = 59264m
-    (19, 66672), // 36 nm = 66672m (OUT OF SEQUENCE! wire index 19!)
-    (15, 88896), // 48 nm = 88896m (maximum range)
+pub const WIRE_INDEX_TABLE: [(i32, i32); 22] = [
+    (21, 116),    // 1/16 nm = 116m - wire index 21!
+    (0, 231),     // 1/8 nm = 231m
+    (1, 463),     // 1/4 nm = 463m
+    (2, 926),     // 1/2 nm = 926m
+    (3, 1389),    // 3/4 nm = 1389m
+    (4, 1852),    // 1 nm = 1852m
+    (5, 2778),    // 1.5 nm = 2778m
+    (6, 3704),    // 2 nm = 3704m
+    (7, 5556),    // 3 nm = 5556m
+    (8, 7408),    // 4 nm = 7408m
+    (9, 11112),   // 6 nm = 11112m
+    (10, 14816),  // 8 nm = 14816m
+    (11, 22224),  // 12 nm = 22224m
+    (12, 29632),  // 16 nm = 29632m
+    (13, 44448),  // 24 nm = 44448m
+    (14, 59264),  // 32 nm = 59264m
+    (19, 66672),  // 36 nm = 66672m (OUT OF SEQUENCE!)
+    (15, 88896),  // 48 nm = 88896m
+    (20, 118528), // 64 nm = 118528m (OUT OF SEQUENCE!)
+    (16, 133344), // 72 nm = 133344m
+    (17, 177792), // 96 nm = 177792m
+    (18, 222240), // 120 nm = 222240m
 ];
 
-/// Convert meters to Furuno wire index
-/// Uses exact match lookup in the WIRE_INDEX_TABLE.
+/// Furuno wire index to meters mapping table (km mode, wire unit 1)
+/// Same wire indices, but range values represent km instead of NM.
+/// Wire index 21 (0.0625) is NOT available in km mode.
+pub const WIRE_INDEX_TABLE_KM: [(i32, i32); 21] = [
+    (0, 125),     // 0.125 km
+    (1, 250),     // 0.25 km
+    (2, 500),     // 0.5 km
+    (3, 750),     // 0.75 km
+    (4, 1000),    // 1 km
+    (5, 1500),    // 1.5 km
+    (6, 2000),    // 2 km
+    (7, 3000),    // 3 km
+    (8, 4000),    // 4 km
+    (9, 6000),    // 6 km
+    (10, 8000),   // 8 km
+    (11, 12000),  // 12 km
+    (12, 16000),  // 16 km
+    (13, 24000),  // 24 km
+    (14, 32000),  // 32 km
+    (19, 36000),  // 36 km (OUT OF SEQUENCE!)
+    (15, 48000),  // 48 km
+    (20, 64000),  // 64 km (OUT OF SEQUENCE!)
+    (16, 72000),  // 72 km
+    (17, 96000),  // 96 km
+    (18, 120000), // 120 km
+];
+
+/// Furuno wire unit values for the range command protocol
+pub const WIRE_UNIT_NM: i32 = 0;
+pub const WIRE_UNIT_KM: i32 = 1;
+// Wire unit 2 = SM (statute miles), 3 = Kyd (kilo-yards) — not yet implemented
+
+/// Convert meters to Furuno wire index, using the NM table.
 pub fn meters_to_wire_index(meters: i32) -> i32 {
+    lookup_wire_index(&WIRE_INDEX_TABLE, meters)
+}
+
+/// Convert meters to Furuno wire index, using the km table.
+pub fn meters_to_wire_index_km(meters: i32) -> i32 {
+    lookup_wire_index(&WIRE_INDEX_TABLE_KM, meters)
+}
+
+/// Convert meters to Furuno wire index using the appropriate table for the wire unit.
+pub fn meters_to_wire_index_for_unit(meters: i32, wire_unit: i32) -> i32 {
+    match wire_unit {
+        WIRE_UNIT_KM => meters_to_wire_index_km(meters),
+        _ => meters_to_wire_index(meters),
+    }
+}
+
+fn lookup_wire_index(table: &[(i32, i32)], meters: i32) -> i32 {
     // Try exact match first
-    for (wire_idx, m) in WIRE_INDEX_TABLE.iter() {
+    for (wire_idx, m) in table.iter() {
         if *m == meters {
             return *wire_idx;
         }
     }
     // If no exact match, find the closest one that's >= requested meters
-    for (wire_idx, m) in WIRE_INDEX_TABLE.iter() {
+    for (wire_idx, m) in table.iter() {
         if *m >= meters {
             return *wire_idx;
         }
     }
-    // Fallback to max range (48nm = wire index 15)
-    15
+    // Fallback to last entry in table
+    table.last().map(|(idx, _)| *idx).unwrap_or(15)
 }
 
-/// Convert Furuno wire index to meters
+/// Convert Furuno wire index to meters (NM mode)
 pub fn wire_index_to_meters(wire_index: i32) -> Option<i32> {
     WIRE_INDEX_TABLE
         .iter()
         .find(|(idx, _)| *idx == wire_index)
         .map(|(_, meters)| *meters)
+}
+
+/// Convert Furuno wire index to meters (km mode)
+pub fn wire_index_to_meters_km(wire_index: i32) -> Option<i32> {
+    WIRE_INDEX_TABLE_KM
+        .iter()
+        .find(|(idx, _)| *idx == wire_index)
+        .map(|(_, meters)| *meters)
+}
+
+/// Convert Furuno wire index to meters using the appropriate table for the wire unit.
+pub fn wire_index_to_meters_for_unit(wire_index: i32, wire_unit: i32) -> Option<i32> {
+    match wire_unit {
+        WIRE_UNIT_KM => wire_index_to_meters_km(wire_index),
+        _ => wire_index_to_meters(wire_index),
+    }
+}
+
+/// Determine the wire unit for a range value in meters.
+/// Metric distances (km-based) use wire unit 1, nautical use wire unit 0.
+pub fn wire_unit_for_meters(meters: i32) -> i32 {
+    // Check if this is a km-table value by looking for exact match
+    if WIRE_INDEX_TABLE_KM
+        .iter()
+        .any(|(_, m)| *m == meters)
+    {
+        // Could be either — check if it's metric (km-based round numbers)
+        if crate::radar::range::Range::is_metric_distance(meters) {
+            return WIRE_UNIT_KM;
+        }
+    }
+    WIRE_UNIT_NM
 }
 
 pub(crate) struct Command {
@@ -327,12 +411,34 @@ impl CommandSender for Command {
             }
 
             ControlId::Range => {
-                // CRITICAL: Must use wire index, not array position!
-                // Wire indices are non-sequential (21=min, 0-15=normal, 19=36nm out of order)
-                let wire_index = meters_to_wire_index(value);
+                // Determine wire unit from the range value (metric vs nautical)
+                let wire_unit = wire_unit_for_meters(value);
+                let wire_index = meters_to_wire_index_for_unit(value, wire_unit);
                 cmd.push(wire_index);
-                cmd.push(0);
-                cmd.push(0);
+                cmd.push(wire_unit);
+                cmd.push(0); // dual_range_id
+                CommandId::Range
+            }
+
+            ControlId::RangeUnits => {
+                // When changing range units, re-send the current range with the new unit.
+                // The radar firmware reinterprets the range index in the new unit context.
+                // value: 0=Nautical, 1=Metric
+                let wire_unit = if value == 1 { WIRE_UNIT_KM } else { WIRE_UNIT_NM };
+
+                // Get the current range in meters
+                let current_range = self
+                    .controls
+                    .get(&ControlId::Range)
+                    .and_then(|c| c.value)
+                    .map(|v| v as i32)
+                    .unwrap_or(11112); // default 6 NM
+
+                // Find the closest range in the new unit's wire table
+                let wire_index = meters_to_wire_index_for_unit(current_range, wire_unit);
+                cmd.push(wire_index);
+                cmd.push(wire_unit);
+                cmd.push(0); // dual_range_id
                 CommandId::Range
             }
 
