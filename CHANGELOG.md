@@ -11,6 +11,7 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 ### Changed
 
 - Emulator loops continuously: boat and targets reverse course when targets leave radar range, then turn back at the starting position (closes #38)
+- Web server listens on IPv6 dual-stack socket, accepting both IPv4 and IPv6 connections
 
 ### Removed
 

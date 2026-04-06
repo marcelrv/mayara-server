@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     str::FromStr,
     sync::Arc,
 };
@@ -135,14 +135,27 @@ impl Web {
 
     pub async fn run(self, subsys: SubsystemHandle) -> Result<(), WebError> {
         let port = self.args.port;
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port);
-        let listener = TcpListener::bind(addr).await.map_err(|e| {
-            if e.kind() == io::ErrorKind::AddrInUse {
-                WebError::PortInUse(port)
-            } else {
-                WebError::Io(e)
-            }
-        })?;
+        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )
+        .map_err(WebError::Io)?;
+        socket.set_only_v6(false).map_err(WebError::Io)?;
+        socket.set_reuse_address(true).map_err(WebError::Io)?;
+        socket.set_nonblocking(true).map_err(WebError::Io)?;
+        socket
+            .bind(&addr.into())
+            .map_err(|e| {
+                if e.kind() == io::ErrorKind::AddrInUse {
+                    WebError::PortInUse(port)
+                } else {
+                    WebError::Io(e)
+                }
+            })?;
+        socket.listen(1024).map_err(WebError::Io)?;
+        let listener = TcpListener::from_std(socket.into()).map_err(WebError::Io)?;
 
         let tls_acceptor = match (&self.args.tls_cert, &self.args.tls_key) {
             (Some(cert), Some(key)) => {
