@@ -3,11 +3,13 @@
 use axum::{
     Json,
     body::Body,
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post, put},
 };
+use futures_util::StreamExt;
+use tokio::io::AsyncWriteExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -82,6 +84,9 @@ struct RecordableRadar {
 
 const RECORDINGS_BASE: &str = "/v2/api/vessels/self/radars/recordings";
 
+/// Maximum size for an uploaded recording file (2 GiB).
+const MAX_UPLOAD_SIZE: usize = 2 * 1024 * 1024 * 1024;
+
 fn validate_filename(filename: &str) -> Result<(), &'static str> {
     if filename.is_empty()
         || filename.contains("..")
@@ -93,6 +98,32 @@ fn validate_filename(filename: &str) -> Result<(), &'static str> {
         return Err("Invalid filename");
     }
     Ok(())
+}
+
+fn validate_upload_filename(filename: &str) -> Result<(), &'static str> {
+    validate_filename(filename)?;
+    let lower = filename.to_ascii_lowercase();
+    if !lower.ends_with(".mrr") && !lower.ends_with(".gz") {
+        return Err("Invalid file extension (expected .mrr or .gz)");
+    }
+    Ok(())
+}
+
+/// Extract the filename from a Content-Disposition header value.
+///
+/// Supports the common `attachment; filename="foo.mrr"` form used by the GUI.
+/// Only a quoted `filename` parameter is recognized.
+fn parse_content_disposition_filename(value: &str) -> Option<String> {
+    for part in value.split(';') {
+        let part = part.trim();
+        if let Some(rest) = part.strip_prefix("filename=") {
+            let trimmed = rest.trim().trim_matches('"');
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn sanitize_for_header(filename: &str) -> String {
@@ -164,6 +195,11 @@ pub fn routes(router: axum::Router<Web>) -> axum::Router<Web> {
         .route(
             &format!("{}/files/{{filename}}/download", RECORDINGS_BASE),
             get(download_recording_handler),
+        )
+        .route(
+            &format!("{}/files/upload", RECORDINGS_BASE),
+            post(upload_recording_handler)
+                .layer(DefaultBodyLimit::max(MAX_UPLOAD_SIZE)),
         )
         .route(
             &format!("{}/directories", RECORDINGS_BASE),
@@ -611,4 +647,128 @@ async fn download_recording_handler(
         )
             .into_response(),
     }
+}
+
+async fn upload_recording_handler(headers: HeaderMap, body: Body) -> impl IntoResponse {
+    let filename = headers
+        .get(axum::http::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_content_disposition_filename);
+
+    let filename = match filename {
+        Some(f) => f,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!(
+                    {"error": "Missing or invalid Content-Disposition filename"}
+                )),
+            );
+        }
+    };
+
+    if let Err(e) = validate_upload_filename(&filename) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        );
+    }
+
+    let manager = RecordingManager::new();
+    let target_path = manager.get_recording_path(&filename, None);
+
+    if target_path.exists() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "File already exists"})),
+        );
+    }
+
+    let tmp_path = target_path.with_file_name(format!("{}.upload", filename));
+    let mut file = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .await
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": "Upload already in progress"})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!(
+                    {"error": format!("Failed to create file: {}", e)}
+                )),
+            );
+        }
+    };
+
+    let mut stream = body.into_data_stream();
+    let mut total: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!(
+                        {"error": format!("Failed to read upload body: {}", e)}
+                    )),
+                );
+            }
+        };
+        total += chunk.len() as u64;
+        if total > MAX_UPLOAD_SIZE as u64 {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({"error": "Upload exceeds 2 GiB limit"})),
+            );
+        }
+        if let Err(e) = file.write_all(&chunk).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!(
+                    {"error": format!("Failed to write file: {}", e)}
+                )),
+            );
+        }
+    }
+
+    if let Err(e) = file.sync_data().await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!(
+                {"error": format!("Failed to sync file: {}", e)}
+            )),
+        );
+    }
+    drop(file);
+
+    if let Err(e) = tokio::fs::rename(&tmp_path, &target_path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!(
+                {"error": format!("Failed to finalize upload: {}", e)}
+            )),
+        );
+    }
+
+    log::info!("Uploaded recording: {} ({} bytes)", filename, total);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "filename": filename,
+            "size": total,
+        })),
+    )
 }

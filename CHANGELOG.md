@@ -56,6 +56,7 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 - GUI showed DISCONNECTED in Firefox after server restart due to unnecessary state reset when spoke stream reconnect triggered a redundant state stream reconnect
 - Heading extracted from spoke data for GUI when no external heading source available
 - Furuno spoke data sockets retry on failure instead of silently staying dead
+- Recording file upload from the GUI (add missing `POST /recordings/files/upload` route)
 - Accept 0xc2 as valid Navico spoke status for HALO20+ compatibility (#27)
 - Move inline `display: none` style to CSS for WebGPU warning element
 - `NoSuchRadar` returns 404 (was 500), response includes list of valid radar IDs
