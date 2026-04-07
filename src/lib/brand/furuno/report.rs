@@ -929,7 +929,11 @@ impl FurunoReportReceiver {
         let sweep_len = metadata.sweep_len as usize;
         let is_range_b = metadata.radar_no == 1 && self.common_b.is_some();
 
-        log::debug!("Received UDP frame with {} spokes (range {})", sweep_count, if is_range_b { "B" } else { "A" });
+        log::debug!(
+            "Received UDP frame with {} spokes (range {})",
+            sweep_count,
+            if is_range_b { "B" } else { "A" }
+        );
 
         if is_range_b {
             self.common_b.as_mut().unwrap().new_spoke_message();
@@ -973,10 +977,30 @@ impl FurunoReportReceiver {
 
             sweep = &sweep[used..];
 
-            if is_range_b {
-                Self::add_spoke_to_common(self.common_b.as_mut().unwrap(), &metadata, angle, heading, &generic_spoke);
+            // The GUI buffers each angle in a slot of FURUNO_SPOKE_LEN samples and
+            // treats that whole slot as covering the spoke's reported physical range.
+            // Radars whose native sweep_len is smaller than FURUNO_SPOKE_LEN (e.g.
+            // DRS4W with sweep_len=430 vs FURUNO_SPOKE_LEN=883) would have their data
+            // confined to the inner sweep_len/FURUNO_SPOKE_LEN fraction of the screen,
+            // making targets appear much closer to own ship than they really are.
+            // Stretch shorter spokes to FURUNO_SPOKE_LEN by nearest-neighbour so that
+            // sample_i represents physical distance i/FURUNO_SPOKE_LEN * range.
+            let send_spoke: Vec<u8> = if generic_spoke.len() < FURUNO_SPOKE_LEN {
+                Self::stretch_spoke(&generic_spoke, FURUNO_SPOKE_LEN)
             } else {
-                Self::add_spoke_to_common(&mut self.common, &metadata, angle, heading, &generic_spoke);
+                generic_spoke.clone()
+            };
+
+            if is_range_b {
+                Self::add_spoke_to_common(
+                    self.common_b.as_mut().unwrap(),
+                    &metadata,
+                    angle,
+                    heading,
+                    &send_spoke,
+                );
+            } else {
+                Self::add_spoke_to_common(&mut self.common, &metadata, angle, heading, &send_spoke);
             }
 
             self.prev_angle = angle;
@@ -1100,6 +1124,29 @@ impl FurunoReportReceiver {
         (spoke, used)
     }
 
+    /// Stretch a decoded spoke from `src.len()` samples to `dst_len` samples
+    /// using nearest-neighbour interpolation. Used to upscale short native spokes
+    /// (e.g. DRS4W's 430) to the GUI's expected slot size (FURUNO_SPOKE_LEN=883),
+    /// so that sample i represents physical distance `i / dst_len * range`
+    /// regardless of the radar's native bin count. Without this, GUI buffers
+    /// would zero-fill the unused tail and confine real returns to the inner
+    /// `src.len() / dst_len` fraction of the screen.
+    fn stretch_spoke(src: &[u8], dst_len: usize) -> Vec<u8> {
+        if src.is_empty() || dst_len == 0 {
+            return vec![0; dst_len];
+        }
+        if src.len() >= dst_len {
+            return src[..dst_len].to_vec();
+        }
+        let src_len = src.len();
+        let mut out = vec![0u8; dst_len];
+        for i in 0..dst_len {
+            let j = (i * src_len) / dst_len;
+            out[i] = src[j];
+        }
+        out
+    }
+
     fn add_spoke_to_common(
         common: &mut CommonRadar,
         metadata: &FurunoSpokeMetadata,
@@ -1112,11 +1159,11 @@ impl FurunoReportReceiver {
                 .info
                 .controls
                 .set(&ControlId::Range, metadata.range as f64, None);
-            let _ = common.info.controls.set(
-                &ControlId::Power,
-                Power::Transmit as u32 as f64,
-                None,
-            );
+            let _ =
+                common
+                    .info
+                    .controls
+                    .set(&ControlId::Power, Power::Transmit as u32 as f64, None);
         }
 
         let heading: Option<u16> = if metadata.have_heading > 0 {
