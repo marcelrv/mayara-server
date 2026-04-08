@@ -112,8 +112,8 @@ pub enum ControlId {
     TrailsMotion,
     DopplerTrailsOnly,
     ClearTrails,
-    TimedIdle,
-    TimedRun,
+    // TimedIdle,
+    // TimedRun,
     DopplerSpeedThreshold,
     NoiseRejection,
     TargetBoost,
@@ -157,6 +157,10 @@ pub enum ControlId {
     SpokeLength,
     SpokeProcessing,
     UserName,
+    // Appended (not inserted above) to keep u8 discriminants of all existing
+    // ControlIds stable for numeric API clients.
+    TimedIdle,
+    TimedRun,
 }
 
 impl Display for ControlId {
@@ -490,7 +494,7 @@ impl ControlId {
             ControlId::SpokeProcessing => ControlDestination::Internal,
             ControlId::TimedIdle => ControlDestination::Command,
             ControlId::TimedRun => ControlDestination::Command,
-            ControlId::RangeUnits => ControlDestination::Internal,
+            ControlId::RangeUnits => ControlDestination::Command,
             ControlId::UserName => ControlDestination::Internal,
         }
     }

@@ -277,26 +277,26 @@ impl Command {
         Ok(())
     }
 
-    fn get_timed_idle_enabled(&self) -> i32 {
-        self.controls
+    fn get_timed_idle_enabled(controls: &SharedControls) -> i32 {
+        controls
             .get(&ControlId::TimedIdle)
             .and_then(|c| c.value)
             .map(|v| v as i32)
             .unwrap_or(0)
     }
 
-    fn get_timed_idle_transmit(&self) -> i32 {
-        self.controls
+    fn get_timed_idle_transmit(controls: &SharedControls) -> i32 {
+        controls
             .get(&ControlId::TimedRun)
             .and_then(|c| c.value)
             .map(|v| v as i32)
             .unwrap_or(60)
     }
 
-    fn get_timed_idle_standby(&self) -> i32 {
+    fn get_timed_idle_standby(controls: &SharedControls) -> i32 {
         // Standby period = 600 - transmit period (so total cycle stays at 10 minutes)
         // Clamped to 60..600 range
-        let transmit = self.get_timed_idle_transmit();
+        let transmit = Self::get_timed_idle_transmit(controls);
         (600 - transmit).max(60)
     }
 
@@ -431,7 +431,7 @@ impl CommandSender for Command {
     async fn set_control(
         &mut self,
         cv: &ControlValue,
-        _: &SharedControls,
+        controls: &SharedControls,
     ) -> Result<(), RadarError> {
         let value = cv.as_i32()?;
         let auto: i32 = if cv.auto.unwrap_or(false) { 1 } else { 0 };
@@ -449,9 +449,9 @@ impl CommandSender for Command {
                     _ => 1,
                 };
 
-                let wman = self.get_timed_idle_enabled();
-                let w_send = self.get_timed_idle_transmit();
-                let w_stop = self.get_timed_idle_standby();
+                let wman = Self::get_timed_idle_enabled(controls);
+                let w_send = Self::get_timed_idle_transmit(controls);
+                let w_stop = Self::get_timed_idle_standby(controls);
 
                 cmd.push(value); // status
                 cmd.push(self.dual_range_id);
@@ -466,8 +466,7 @@ impl CommandSender for Command {
             ControlId::TimedIdle | ControlId::TimedRun => {
                 // Resend the Status command with updated watchman settings.
                 // Wire format: $S69,{status},{drid},{wman},{w_send},{w_stop},0
-                let power = self
-                    .controls
+                let power = controls
                     .get(&ControlId::Power)
                     .and_then(|c| c.value)
                     .map(|v| v as i32)
@@ -481,12 +480,12 @@ impl CommandSender for Command {
                 let wman = if cv.id == ControlId::TimedIdle {
                     value // the new value being set
                 } else {
-                    self.get_timed_idle_enabled()
+                    Self::get_timed_idle_enabled(controls)
                 };
                 let w_send = if cv.id == ControlId::TimedRun {
                     value
                 } else {
-                    self.get_timed_idle_transmit()
+                    Self::get_timed_idle_transmit(controls)
                 };
                 let w_stop = (600 - w_send).max(60);
 

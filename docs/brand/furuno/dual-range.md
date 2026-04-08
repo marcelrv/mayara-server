@@ -41,19 +41,29 @@ Each UDP frame has a 16-byte metadata header. Based on the TimeZero `RadarSweepM
 struct and the native DLL callback signature, each frame carries a `radarNo` field (0 or 1)
 that identifies which range the spokes belong to.
 
-Disassembly of `DecodeImoEchoFormat` in the native `radar.dll` confirmed that the radar
-identifier is at **byte 11 bits 6-7** of the UDP frame header. This field was previously
-computed as `v3` in our parser but discarded. It is now extracted as `radar_no` and used
-for spoke demultiplexing. The radar.dll uses this value to index into per-radar sweep
-buffers at a stride of `0x104024` bytes, confirming it is the dual range identifier
-(0 = Range A, 1 = Range B). See `research/furuno/spoke-frame-header.md` for the complete
-16-byte header layout.
+Live on-wire captures from a DRS4D-NXT confirmed that the dual-range identifier is at
+**byte 15 bit 6** of the UDP frame header: Range A frames have byte 15 = 0x09, Range B
+frames have byte 15 = 0x49. The radar.dll disassembly originally pointed at byte 11
+bits 6-7 (our old `v3`), but on-wire captures show those bits are always `0b11` on
+DRS4D-NXT (and `0b01` on DRS4W) regardless of which range a spoke belongs to — they are
+model metadata, not the range selector. The value at byte 15 bit 6 is extracted as
+`radar_no` and used for spoke demultiplexing (0 = Range A, 1 = Range B).
 
 ### Reports (TCP)
 
-Report responses (`$N62,...`, `$N63,...` etc.) arrive on the shared TCP connection. The
-response likely includes the range context in its parameters, similar to how the unit field
-is already present in range reports.
+Report responses (`$N62,...`, `$N63,...`, etc.) arrive on the shared TCP connection and
+are routed to Range A or Range B by extracting the per-command `drid` field. The
+position of `drid` within the response varies per command:
+
+- Status (`$N69`) — last field
+- Gain (`$N63`) — last field
+- Sea (`$N64`) — last field
+- Rain (`$N65`) — field 4
+- Tune (`$N75`) — field 2 (`screen` is `drid`)
+- Range (`$N62`) — field 2 (after wire index and wire unit)
+
+These positions were verified against live Wireshark captures from a DRS4D-NXT running
+in dual range mode with TimeZero as the controlling client.
 
 ## Architecture: Navico HALO vs Furuno DRS
 
@@ -159,17 +169,11 @@ Similarly, Range B's updates use `dual_range_id=1`.
 
 ### Spoke Demultiplexing
 
-The UDP frame header must contain a range identifier. Based on our reverse engineering:
-
-- TimeZero's `SweepSeriousFactory.CreateSweep()` receives `radarNo` as the first parameter
-- The native DLL's `RmGetSweeps()` returns `RadarSweepMetadata` with a `radarNo` field
-- In our `parse_metadata_header()`, candidates are:
-  - `data[11]` bits 5-6 (`v2` and `v3`) — currently unused
-  - `data[13]` or `data[14]` — not yet parsed
-  - The `status` field that TimeZero extracts
-
-Until confirmed with a real dual-range pcap, the demux logic should check the identified
-byte and route `radarNo=0` frames to `common_a` and `radarNo=1` frames to `common_b`.
+The UDP frame header carries the range identifier at **byte 15 bit 6**
+(`(data[15] & 0x40) >> 6`). `parse_metadata_header()` extracts this as `radar_no`;
+`process_frame()` routes frames with `radar_no == 0` to the Range A `CommonRadar` and
+frames with `radar_no == 1` to the Range B `CommonRadar`. Confirmed by alternating
+dual-range frames in a live DRS4D-NXT capture.
 
 ### Discovery Changes
 
