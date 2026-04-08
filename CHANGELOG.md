@@ -8,9 +8,14 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 
 ## [Unreleased]
 
+### Added
+
+- Navico HALO antenna offset controls (forward/starboard) read from StateProperties and settable via 0xC130
+
 ### Changed
 
 - Navico beacon parsing uses dynamic device/service format for all models (BR24, 3G, 4G, HALO)
+- GUI uses numeric input instead of sliders for meter and degree valued controls
 - Emulator loops continuously: boat and targets reverse course when targets leave radar range, then turn back at the starting position (closes #38)
 - Web server listens on IPv6 dual-stack socket, accepting both IPv4 and IPv6 connections
 

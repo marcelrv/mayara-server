@@ -140,9 +140,9 @@ pub enum ControlId {
     NoTransmitSector3,
     NoTransmitSector4,
     AccentLight,
-    // AntennaForward,
     AntennaHeight,
-    // AntennaStarboard,
+    AntennaForward,
+    AntennaStarboard,
     BearingAlignment,
     // Orientation,
     RotationSpeed,
@@ -216,7 +216,9 @@ impl ControlId {
             | ControlId::ClearTrails
             | ControlId::TrailsMotion => Category::Trails,
             ControlId::AccentLight
+            | ControlId::AntennaForward
             | ControlId::AntennaHeight
+            | ControlId::AntennaStarboard
             | ControlId::BearingAlignment
             | ControlId::NoTransmitSector1
             | ControlId::NoTransmitSector2
@@ -325,7 +327,9 @@ impl ControlId {
             ControlId::NoTransmitSector3 => "Third no-transmit sector",
             ControlId::NoTransmitSector4 => "Fourth no-transmit sector",
             ControlId::AccentLight => "Strength of the accent light",
+            ControlId::AntennaForward => "Antenna offset forward of GPS position",
             ControlId::AntennaHeight => "Height of the antenna above waterline",
+            ControlId::AntennaStarboard => "Antenna offset starboard of GPS position",
             ControlId::BearingAlignment => "Alignment of the antenna relative to the vessel's bow",
             ControlId::RotationSpeed => "How quickly the radar antenna rotates",
             ControlId::MagnetronCurrent => "The current supplied to the magnetron",
@@ -349,10 +353,9 @@ impl ControlId {
     fn get_name(&self) -> &'static str {
         match self {
             ControlId::AccentLight => "Accent light",
-            // ControlId::AllAuto => "All to Auto",
-            // ControlId::AntennaForward => "Antenna forward of GPS",
+            ControlId::AntennaForward => "Antenna forward",
             ControlId::AntennaHeight => "Antenna height",
-            // ControlId::AntennaStarboard => "Antenna starboard of GPS",
+            ControlId::AntennaStarboard => "Antenna starboard",
             ControlId::BearingAlignment => "Bearing alignment",
             // ControlId::ColorGain => "Color gain",
             ControlId::ShowAis => "Show AIS",
@@ -484,6 +487,8 @@ impl ControlId {
             ControlId::RotationSpeed => ControlDestination::Command,
             ControlId::MagnetronCurrent => ControlDestination::Command,
             ControlId::SignalStrength => ControlDestination::Command,
+            ControlId::AntennaForward => ControlDestination::Command,
+            ControlId::AntennaStarboard => ControlDestination::Command,
             ControlId::OperatingTime => ControlDestination::ReadOnly,
             ControlId::TransmitTime => ControlDestination::ReadOnly,
             ControlId::ModelName => ControlDestination::ReadOnly,

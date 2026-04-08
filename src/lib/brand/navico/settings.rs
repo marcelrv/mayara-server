@@ -30,9 +30,17 @@ pub fn new(
             .set_string(model.unwrap().to_string());
     }
 
+    new_numeric(ControlId::AntennaForward, -100., 100.)
+        .wire_scale_factor(1000., true)
+        .wire_units(Units::Meters)
+        .build(&mut controls);
     new_numeric(ControlId::AntennaHeight, 0., 60.)
         .wire_scale_factor(1000., false)
         .wire_scale_step(0.1) // Allow control in decimeters
+        .wire_units(Units::Meters)
+        .build(&mut controls);
+    new_numeric(ControlId::AntennaStarboard, -100., 100.)
+        .wire_scale_factor(1000., true)
         .wire_units(Units::Meters)
         .build(&mut controls);
     new_numeric(ControlId::BearingAlignment, -180., 180.)

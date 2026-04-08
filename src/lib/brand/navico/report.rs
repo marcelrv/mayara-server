@@ -302,6 +302,13 @@ impl StateConfig {
 
 const STATE_CONFIG: u8 = 0x03;
 
+// StateFeatures uses fixed offsets for BR24/4G/HALO radars observed in captures.
+// Note: SRX firmware (2023+) uses tPackedDataParser TLV encoding for this opcode,
+// with feature IDs: 2=UseModes, 3=InterferenceReject, 4=NoiseReject, 5=TargetBoost,
+// 6=STCCurve, 7=BeamSharpening, 8=FastScan, 9=SidelobeGainRange,
+// 10=SupportedAntennas, 11=InstrumentedRange, 12=LocalInterferenceReject.
+// The TLV format uses 3-byte headers (type, unknown, length) per block.
+// All captures to date use the fixed 66-byte format below.
 #[derive(Debug)]
 #[repr(packed)]
 struct StateFeatures {
@@ -344,9 +351,12 @@ struct StateProperties68 {
     _category: u8,
     _u00: [u8; 4],                       // 2..6
     name: [u8; 6],                       // 6..12
-    _u01: [u8; 24],                      // 12..36
+    _u01: [u8; 10],                      // 12..22
+    antenna_forward: [u8; 4],            // 22..26 ahead offset in mm (i32 LE)
+    antenna_starboard: [u8; 4],          // 26..30 starboard offset in mm (i32 LE)
+    _u02: [u8; 6],                       // 30..36
     blanking: [SectorBlankingReport; 4], // 36..56
-    _u02: [u8; 12],                      // 56..68
+    _u03: [u8; 12],                      // 56..68
 }
 
 impl StateProperties68 {
@@ -366,9 +376,12 @@ struct StateProperties74 {
     _category: u8,
     _u00: [u8; 4],                       // 2..6
     name: [u8; 6],                       // 6..12
-    _u01: [u8; 30],                      // 12..42
-    blanking: [SectorBlankingReport; 4], // 42..52
-    _u0: [u8; 12],                       // 62..74
+    _u01: [u8; 10],                      // 12..22
+    antenna_forward: [u8; 4],            // 22..26 ahead offset in mm (i32 LE)
+    antenna_starboard: [u8; 4],          // 26..30 starboard offset in mm (i32 LE)
+    _u02: [u8; 12],                      // 30..42
+    blanking: [SectorBlankingReport; 4], // 42..62
+    _u03: [u8; 12],                      // 62..74
 }
 
 impl StateProperties74 {
@@ -1220,6 +1233,15 @@ impl NavicoReportReceiver {
         self.common
             .set_string(&ControlId::ModelName, name.unwrap_or("").to_string());
 
+        self.common.set_value(
+            &ControlId::AntennaForward,
+            i32::from_le_bytes(report.antenna_forward) as f64,
+        );
+        self.common.set_value(
+            &ControlId::AntennaStarboard,
+            i32::from_le_bytes(report.antenna_starboard) as f64,
+        );
+
         for (i, sector) in super::BLANKING_SECTORS {
             let blanking = &report.blanking[i];
             let start_angle = i16::from_le_bytes(blanking.start_angle);
@@ -1250,6 +1272,15 @@ impl NavicoReportReceiver {
             "Radar name '{}' model '{}'",
             name.unwrap_or("null"),
             self.model
+        );
+
+        self.common.set_value(
+            &ControlId::AntennaForward,
+            i32::from_le_bytes(report.antenna_forward) as f64,
+        );
+        self.common.set_value(
+            &ControlId::AntennaStarboard,
+            i32::from_le_bytes(report.antenna_starboard) as f64,
         );
 
         for (i, sector) in super::BLANKING_SECTORS {

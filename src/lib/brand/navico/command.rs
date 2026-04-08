@@ -303,6 +303,18 @@ impl CommandSender for Command {
                 cmd.extend_from_slice(&[0x24, 0xc1]);
                 cmd.extend_from_slice(&value.to_le_bytes());
             }
+            ControlId::AntennaForward | ControlId::AntennaStarboard => {
+                let (ahead_mm, starboard_mm) = if cv.id == ControlId::AntennaForward {
+                    let other = controls.get(&ControlId::AntennaStarboard).unwrap();
+                    ((value * 1000.) as i32, (other.as_f64().unwrap_or(0.) * 1000.) as i32)
+                } else {
+                    let other = controls.get(&ControlId::AntennaForward).unwrap();
+                    ((other.as_f64().unwrap_or(0.) * 1000.) as i32, (value * 1000.) as i32)
+                };
+                cmd.extend_from_slice(&[0x30, 0xc1, 0x04, 0, 0, 0]);
+                cmd.extend_from_slice(&ahead_mm.to_le_bytes());
+                cmd.extend_from_slice(&starboard_mm.to_le_bytes());
+            }
             ControlId::AntennaHeight => {
                 let value = (value * 1000.) as u16;
                 cmd.extend_from_slice(&[0x30, 0xc1, 0x01, 0, 0, 0]);
