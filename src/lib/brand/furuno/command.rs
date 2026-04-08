@@ -193,10 +193,7 @@ pub fn wire_index_to_meters_for_unit(wire_index: i32, wire_unit: i32) -> Option<
 /// Metric distances (km-based) use wire unit 1, nautical use wire unit 0.
 pub fn wire_unit_for_meters(meters: i32) -> i32 {
     // Check if this is a km-table value by looking for exact match
-    if WIRE_INDEX_TABLE_KM
-        .iter()
-        .any(|(_, m)| *m == meters)
-    {
+    if WIRE_INDEX_TABLE_KM.iter().any(|(_, m)| *m == meters) {
         // Could be either — check if it's metric (km-based round numbers)
         if crate::radar::range::Range::is_metric_distance(meters) {
             return WIRE_UNIT_KM;
@@ -475,7 +472,11 @@ impl CommandSender for Command {
                     .and_then(|c| c.value)
                     .map(|v| v as i32)
                     .unwrap_or(Power::Standby as i32);
-                let status = if power == Power::Transmit as i32 { 2 } else { 1 };
+                let status = if power == Power::Transmit as i32 {
+                    2
+                } else {
+                    1
+                };
 
                 let wman = if cv.id == ControlId::TimedIdle {
                     value // the new value being set
@@ -513,7 +514,11 @@ impl CommandSender for Command {
                 // When changing range units, re-send the current range with the new unit.
                 // The radar firmware reinterprets the range index in the new unit context.
                 // value: 0=Nautical, 1=Metric
-                let wire_unit = if value == 1 { WIRE_UNIT_KM } else { WIRE_UNIT_NM };
+                let wire_unit = if value == 1 {
+                    WIRE_UNIT_KM
+                } else {
+                    WIRE_UNIT_NM
+                };
 
                 // Get the current range in meters
                 let current_range = self

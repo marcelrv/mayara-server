@@ -55,7 +55,7 @@ struct Capabilities {
     main_bang_suppression: bool,
     rez_boost: bool,
     bird_mode: bool,
-    target_analyzer: bool,     // Doppler
+    target_analyzer: bool, // Doppler
     target_analyzer_rain: bool,
     noise_rejection: bool,
     interference_rejection_levels: u8, // 0=none, 2=off/on, 4=off/low/med/high
@@ -67,68 +67,140 @@ struct Capabilities {
 fn capabilities(model: &RadarModel) -> Capabilities {
     match model {
         // NXT series: full feature set
-        RadarModel::DRS4DNXT | RadarModel::DRS6ANXT
-        | RadarModel::DRS12ANXT | RadarModel::DRS25ANXT => Capabilities {
-            auto_gain: true, auto_sea: true, auto_rain: true,
-            dual_range: true, scan_speed: true, sector_blanking: true,
-            main_bang_suppression: true, rez_boost: true, bird_mode: true,
-            target_analyzer: true, target_analyzer_rain: true,
-            noise_rejection: true, interference_rejection_levels: 2,
-            tune: true, antenna_height: true, watchman: true,
+        RadarModel::DRS4DNXT
+        | RadarModel::DRS6ANXT
+        | RadarModel::DRS12ANXT
+        | RadarModel::DRS25ANXT => Capabilities {
+            auto_gain: true,
+            auto_sea: true,
+            auto_rain: true,
+            dual_range: true,
+            scan_speed: true,
+            sector_blanking: true,
+            main_bang_suppression: true,
+            rez_boost: true,
+            bird_mode: true,
+            target_analyzer: true,
+            target_analyzer_rain: true,
+            noise_rejection: true,
+            interference_rejection_levels: 2,
+            tune: true,
+            antenna_height: true,
+            watchman: true,
         },
         // DRS6A X-Class: DRS + bird mode
         RadarModel::DRS6AXCLASS => Capabilities {
-            auto_gain: true, auto_sea: true, auto_rain: true,
-            dual_range: false, scan_speed: false, sector_blanking: false,
-            main_bang_suppression: false, rez_boost: false, bird_mode: true,
-            target_analyzer: false, target_analyzer_rain: false,
-            noise_rejection: false, interference_rejection_levels: 0,
-            tune: true, antenna_height: false, watchman: false,
+            auto_gain: true,
+            auto_sea: true,
+            auto_rain: true,
+            dual_range: false,
+            scan_speed: false,
+            sector_blanking: false,
+            main_bang_suppression: false,
+            rez_boost: false,
+            bird_mode: true,
+            target_analyzer: false,
+            target_analyzer_rain: false,
+            noise_rejection: false,
+            interference_rejection_levels: 0,
+            tune: true,
+            antenna_height: false,
+            watchman: false,
         },
         // DRS4DL: limited (no auto gain, no scan speed, no dual range)
         RadarModel::DRS4DL => Capabilities {
-            auto_gain: false, auto_sea: true, auto_rain: true,
-            dual_range: false, scan_speed: false, sector_blanking: false,
-            main_bang_suppression: false, rez_boost: false, bird_mode: false,
-            target_analyzer: false, target_analyzer_rain: false,
-            noise_rejection: false, interference_rejection_levels: 2,
-            tune: true, antenna_height: false, watchman: false,
+            auto_gain: false,
+            auto_sea: true,
+            auto_rain: true,
+            dual_range: false,
+            scan_speed: false,
+            sector_blanking: false,
+            main_bang_suppression: false,
+            rez_boost: false,
+            bird_mode: false,
+            target_analyzer: false,
+            target_analyzer_rain: false,
+            noise_rejection: false,
+            interference_rejection_levels: 2,
+            tune: true,
+            antenna_height: false,
+            watchman: false,
         },
         // Standard DRS
         RadarModel::DRS | RadarModel::DRS4W => Capabilities {
-            auto_gain: true, auto_sea: true, auto_rain: true,
-            dual_range: false, scan_speed: false, sector_blanking: false,
-            main_bang_suppression: false, rez_boost: false, bird_mode: false,
-            target_analyzer: false, target_analyzer_rain: false,
-            noise_rejection: false, interference_rejection_levels: 0,
-            tune: true, antenna_height: false, watchman: false,
+            auto_gain: true,
+            auto_sea: true,
+            auto_rain: true,
+            dual_range: false,
+            scan_speed: false,
+            sector_blanking: false,
+            main_bang_suppression: false,
+            rez_boost: false,
+            bird_mode: false,
+            target_analyzer: false,
+            target_analyzer_rain: false,
+            noise_rejection: false,
+            interference_rejection_levels: 0,
+            tune: true,
+            antenna_height: false,
+            watchman: false,
         },
         // FAR series: commercial, 4-level IR, no NXT features
         RadarModel::FAR21x7 | RadarModel::FAR14x7 | RadarModel::FAR14x6 => Capabilities {
-            auto_gain: false, auto_sea: false, auto_rain: false,
-            dual_range: false, scan_speed: false, sector_blanking: false,
-            main_bang_suppression: false, rez_boost: false, bird_mode: false,
-            target_analyzer: false, target_analyzer_rain: false,
-            noise_rejection: false, interference_rejection_levels: 4,
-            tune: true, antenna_height: false, watchman: false,
+            auto_gain: false,
+            auto_sea: false,
+            auto_rain: false,
+            dual_range: false,
+            scan_speed: false,
+            sector_blanking: false,
+            main_bang_suppression: false,
+            rez_boost: false,
+            bird_mode: false,
+            target_analyzer: false,
+            target_analyzer_rain: false,
+            noise_rejection: false,
+            interference_rejection_levels: 4,
+            tune: true,
+            antenna_height: false,
+            watchman: false,
         },
         // FAR-15x3 / FAR-3000: auto sea/rain, noise rejection
         RadarModel::FAR15x3 | RadarModel::FAR3000 => Capabilities {
-            auto_gain: false, auto_sea: true, auto_rain: true,
-            dual_range: false, scan_speed: false, sector_blanking: false,
-            main_bang_suppression: false, rez_boost: false, bird_mode: false,
-            target_analyzer: false, target_analyzer_rain: false,
-            noise_rejection: true, interference_rejection_levels: 4,
-            tune: true, antenna_height: false, watchman: false,
+            auto_gain: false,
+            auto_sea: true,
+            auto_rain: true,
+            dual_range: false,
+            scan_speed: false,
+            sector_blanking: false,
+            main_bang_suppression: false,
+            rez_boost: false,
+            bird_mode: false,
+            target_analyzer: false,
+            target_analyzer_rain: false,
+            noise_rejection: true,
+            interference_rejection_levels: 4,
+            tune: true,
+            antenna_height: false,
+            watchman: false,
         },
         // Unknown: basic capabilities
         RadarModel::Unknown => Capabilities {
-            auto_gain: true, auto_sea: true, auto_rain: true,
-            dual_range: false, scan_speed: false, sector_blanking: false,
-            main_bang_suppression: false, rez_boost: false, bird_mode: false,
-            target_analyzer: false, target_analyzer_rain: false,
-            noise_rejection: false, interference_rejection_levels: 0,
-            tune: true, antenna_height: false, watchman: false,
+            auto_gain: true,
+            auto_sea: true,
+            auto_rain: true,
+            dual_range: false,
+            scan_speed: false,
+            sector_blanking: false,
+            main_bang_suppression: false,
+            rez_boost: false,
+            bird_mode: false,
+            target_analyzer: false,
+            target_analyzer_rain: false,
+            noise_rejection: false,
+            interference_rejection_levels: 0,
+            tune: true,
+            antenna_height: false,
+            watchman: false,
         },
     }
 }
@@ -165,9 +237,12 @@ pub fn update_when_model_known(info: &mut RadarInfo, model: RadarModel, version:
 
     // Tuning
     if cap.tune {
-        info.controls.add(
-            new_auto(ControlId::Tune, 0., 2000., HAS_AUTO_NOT_ADJUSTABLE),
-        );
+        info.controls.add(new_auto(
+            ControlId::Tune,
+            0.,
+            2000.,
+            HAS_AUTO_NOT_ADJUSTABLE,
+        ));
     }
 
     // Antenna controls (shared across ranges)
@@ -194,10 +269,8 @@ pub fn update_when_model_known(info: &mut RadarInfo, model: RadarModel, version:
             .add(new_numeric(ControlId::MainBangSuppression, 0., 100.));
     }
     if cap.antenna_height {
-        info.controls.add(
-            new_numeric(ControlId::AntennaHeight, 0., 30.)
-                .wire_units(Units::Meters),
-        );
+        info.controls
+            .add(new_numeric(ControlId::AntennaHeight, 0., 30.).wire_units(Units::Meters));
     }
 
     // Interference rejection (model-dependent levels)
@@ -244,10 +317,8 @@ pub fn update_when_model_known(info: &mut RadarInfo, model: RadarModel, version:
     if cap.watchman {
         info.controls
             .add(new_list(ControlId::TimedIdle, &["Off", "On"]));
-        info.controls.add(
-            new_numeric(ControlId::TimedRun, 10., 120.)
-                .wire_units(Units::Seconds),
-        );
+        info.controls
+            .add(new_numeric(ControlId::TimedRun, 10., 120.).wire_units(Units::Seconds));
     }
     if cap.dual_range {
         info.dual_range = true;
