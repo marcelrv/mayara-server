@@ -49,21 +49,21 @@ mpi:
 	cargo build --release --target aarch64-unknown-linux-musl
 	ssh merrimac-pi killall -9 mayara-server || :
 	scp target/aarch64-unknown-linux-musl/release/mayara-server merrimac-pi:
-	ssh merrimac-pi RUST_BACKTRACE=full ./mayara-server --pass-ais
+	ssh -L 6502:localhost:6502 merrimac-pi RUST_BACKTRACE=full ./mayara-server --pass-ais
 
 mpid:
 	@echo "Building and running with debug log on merrimac-pi..."
 	cargo build --release --target aarch64-unknown-linux-musl
 	ssh merrimac-pi killall -9 mayara-server || :
 	scp target/aarch64-unknown-linux-musl/release/mayara-server merrimac-pi:
-	ssh merrimac-pi RUST_BACKTRACE=full ./mayara-server -v --transmit --pass-ais
+	ssh -L 6502:localhost:6502 merrimac-pi RUST_BACKTRACE=full ./mayara-server -v --transmit --pass-ais
 
 mpit:
 	@echo "Building and running with trace log on merrimac-pi..."
 	cargo build --release --target aarch64-unknown-linux-musl
 	ssh merrimac-pi killall -9 mayara-server || :
 	scp target/aarch64-unknown-linux-musl/release/mayara-server merrimac-pi:
-	ssh merrimac-pi RUST_BACKTRACE=full ./mayara-server -v -v --transmit --pass-ais
+	ssh -L 6502:localhost:6502 merrimac-pi RUST_BACKTRACE=full ./mayara-server -v -v --transmit --pass-ais
 
 # Build debug with dev feature (GUI served from filesystem, no embedding)
 # Useful for GUI development - just refresh browser after editing JS/HTML
