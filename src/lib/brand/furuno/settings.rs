@@ -25,9 +25,12 @@ pub fn new(
         .read_only(false)
         .build(&mut controls);
 
-    new_auto(ControlId::Gain, 0., 100., HAS_AUTO_NOT_ADJUSTABLE).build(&mut controls);
-    new_auto(ControlId::Sea, 0., 100., HAS_AUTO_NOT_ADJUSTABLE).build(&mut controls);
-    new_auto(ControlId::Rain, 0., 100., HAS_AUTO_NOT_ADJUSTABLE).build(&mut controls);
+    // Gain/Sea/Rain are added in update_when_model_known() once the model's
+    // auto-capability flags are known. Until the model is detected the default
+    // is a plain numeric control without auto, re-created later.
+    new_numeric(ControlId::Gain, 0., 100.).build(&mut controls);
+    new_numeric(ControlId::Sea, 0., 100.).build(&mut controls);
+    new_numeric(ControlId::Rain, 0., 100.).build(&mut controls);
     new_numeric(ControlId::OperatingTime, 0., 999999999.)
         .read_only(true)
         .wire_units(Units::Seconds)
@@ -229,6 +232,28 @@ pub fn update_when_model_known(info: &mut RadarInfo, model: RadarModel, version:
     info.set_ranges(ranges);
 
     let cap = capabilities(&model);
+
+    // Re-create Gain / Sea / Rain with auto flags matching the detected
+    // model's capabilities. The defaults installed in new() were plain
+    // numeric controls because capabilities aren't known at discovery time.
+    if cap.auto_gain {
+        info.controls
+            .add(new_auto(ControlId::Gain, 0., 100., HAS_AUTO_NOT_ADJUSTABLE));
+    } else {
+        info.controls.add(new_numeric(ControlId::Gain, 0., 100.));
+    }
+    if cap.auto_sea {
+        info.controls
+            .add(new_auto(ControlId::Sea, 0., 100., HAS_AUTO_NOT_ADJUSTABLE));
+    } else {
+        info.controls.add(new_numeric(ControlId::Sea, 0., 100.));
+    }
+    if cap.auto_rain {
+        info.controls
+            .add(new_auto(ControlId::Rain, 0., 100., HAS_AUTO_NOT_ADJUSTABLE));
+    } else {
+        info.controls.add(new_numeric(ControlId::Rain, 0., 100.));
+    }
 
     info.controls.add(new_string(ControlId::FirmwareVersion));
     info.controls

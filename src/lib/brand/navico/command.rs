@@ -312,6 +312,16 @@ impl CommandSender for Command {
             ControlId::AccentLight => {
                 cmd.extend_from_slice(&[0x31, 0xc1, value as u8]);
             }
+            // RangeUnits is a client-side display preference on Navico:
+            // the radar always reports distances in meters and the unit
+            // choice only affects how the GUI labels them. Persist the
+            // value in SharedControls without emitting a wire command.
+            ControlId::RangeUnits => {
+                if let Some(v) = cv.value.as_ref().and_then(|v| v.as_f64()) {
+                    let _ = controls.set_value(&ControlId::RangeUnits, v.into());
+                }
+                return Ok(());
+            }
 
             // Non-hardware settings
             _ => return Err(RadarError::CannotSetControlId(cv.id)),

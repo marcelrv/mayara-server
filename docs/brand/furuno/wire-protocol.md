@@ -113,11 +113,15 @@ Wire index 21 (0.0625) is not available in km mode.
 | Offset | Bits | Field |
 |--------|------|-------|
 | 0      | 8    | Frame type (0x02) |
-| 8-9    | 9+7  | v1 (computed), sweep_count |
-| 10-11  | 11+2+1+2 | sweep_len, encoding, v2, v3 |
-| 12     | 8    | wire_index (range) |
-| 13-14  | 16   | Unknown (likely contains radarNo for dual range) |
-| 15     | 8    | Flags (bits 4-5: have_heading) |
+| 1      | 8    | sequence_number |
+| 2-3    | 16   | total_length (big-endian) |
+| 4-7    | 32   | timestamp (little-endian) |
+| 8-9    | 9+7  | spoke_data_len (bytes 8+9 bit 0), spoke_count (byte 9 bits 1-7) |
+| 10-11  | 11+2+1+2 | sweep_len (byte 10 + byte 11 bits 0-2), encoding (byte 11 bits 3-4), heading_valid (byte 11 bit 5), model metadata (byte 11 bits 6-7: 0b11 on DRS4D-NXT, 0b01 on DRS4W) |
+| 12     | 6+2  | wire_index (bits 0-5), range_status (bits 6-7) |
+| 13     | 8    | range_resolution metadata |
+| 14-15  | 11   | range_value (byte 14 + byte 15 bits 0-2) |
+| 15     | 4    | echo_type (bits 4-5), **dual_range_id (bit 6)** — 0 = Range A, 1 = Range B |
 
 Each spoke within the frame:
 - 2 bytes: angle (0-8191, little-endian)

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::brand::CommandSender;
-use crate::radar::settings::{ControlValue, SharedControls};
+use crate::radar::settings::{ControlId, ControlValue, SharedControls};
 use crate::radar::{RadarError, RadarInfo};
 
 /// Command sender for the emulator radar.
@@ -21,7 +21,7 @@ impl CommandSender for Command {
     async fn set_control(
         &mut self,
         cv: &ControlValue,
-        _controls: &SharedControls,
+        controls: &SharedControls,
     ) -> Result<(), RadarError> {
         log::debug!(
             "{}: Emulator set_control {:?} = {:?}",
@@ -29,6 +29,13 @@ impl CommandSender for Command {
             cv.id,
             cv.value
         );
+        // RangeUnits is a client-side display preference; persist it in
+        // SharedControls since no emulator state loop echoes it back.
+        if cv.id == ControlId::RangeUnits {
+            if let Some(v) = cv.value.as_ref().and_then(|v| v.as_f64()) {
+                let _ = controls.set_value(&ControlId::RangeUnits, v.into());
+            }
+        }
         // Emulator just acknowledges the command - actual state is managed in report.rs
         Ok(())
     }

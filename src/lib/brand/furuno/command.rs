@@ -519,9 +519,10 @@ impl CommandSender for Command {
                     WIRE_UNIT_NM
                 };
 
-                // Get the current range in meters
-                let current_range = self
-                    .controls
+                // Get the current range in meters from the target range's
+                // controls (not self.controls, which is Range A's handle and
+                // would be wrong when the unit change is targeting Range B).
+                let current_range = controls
                     .get(&ControlId::Range)
                     .and_then(|c| c.value)
                     .map(|v| v as i32)

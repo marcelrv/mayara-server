@@ -35,7 +35,7 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 - Furuno dual range: correct drid field positions for all per-range commands (Status, Gain, Sea, Rain) — verified against live Wireshark captures
 - Furuno dual range: Range response now correctly reads unit from field 1 (was field 2, which is actually drid)
 - Furuno spoke header: dual_range_id is at byte 15 bit 6 (was incorrectly at byte 11 bits 6-7, which are always 0b11)
-- Furuno spoke header: init sends Range B command ($S62,9,0,1) to activate dual range spoke interleaving
+- Furuno dual range: Range B spoke interleaving is no longer auto-activated at init; it starts after the first explicit Range B range command sent by the client
 - Furuno tune control max increased from 100 to 2000 to accommodate raw radar values
 - Furuno DRS4W: pad short spokes to sweep_len — compressed data on compact WiFi radars can produce fewer samples than expected (#48)
 - Furuno DRS4W: stretch short native spokes (430 samples) to FURUNO_SPOKE_LEN (883) so that targets render at their correct radial distance instead of being squashed into the inner ~49% of the screen (#48)

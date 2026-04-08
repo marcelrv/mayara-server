@@ -56,8 +56,12 @@ pub struct FurunoReportReceiver {
     multicast_socket: Option<UdpSocket>,
     broadcast_socket: Option<UdpSocket>,
 
-    prev_spoke: Vec<u8>,
-    prev_angle: u16,
+    // Delta-decoding state kept per range (index 0 = A, 1 = B) because
+    // dual-range interleaves two independent spoke streams on the same UDP
+    // socket. Sharing a single prev_spoke across A/B would corrupt the first
+    // delta-decoded spoke after every switch.
+    prev_spoke: [Vec<u8>; 2],
+    prev_angle: [u16; 2],
 }
 
 impl FurunoReportReceiver {
@@ -92,8 +96,8 @@ impl FurunoReportReceiver {
             receive_type: ReceiveAddressType::Both,
             multicast_socket: None,
             broadcast_socket: None,
-            prev_spoke: Vec::new(),
-            prev_angle: 0,
+            prev_spoke: [Vec::new(), Vec::new()],
+            prev_angle: [0, 0],
         }
     }
 
@@ -602,8 +606,13 @@ impl FurunoReportReceiver {
                         })?;
 
                 let drid = self.extract_drid(&command_id, &numbers);
-                self.common_for_range(drid)
-                    .set_value(&ControlId::Range, range_meters as f64);
+                let range_units_value = match wire_unit {
+                    super::command::WIRE_UNIT_KM => 1.0, // Metric
+                    _ => 0.0,                            // Nautical
+                };
+                let target = self.common_for_range(drid);
+                target.set_value(&ControlId::Range, range_meters as f64);
+                target.set_value(&ControlId::RangeUnits, range_units_value);
             }
             CommandId::OnTime => {
                 let seconds = numbers[0];
@@ -951,6 +960,7 @@ impl FurunoReportReceiver {
             let heading = (((sweep[3] & 0x1F) as u16) << 8) | sweep[2] as u16;
             sweep = &sweep[4..];
 
+            let range_idx = if is_range_b { 1 } else { 0 };
             let (mut generic_spoke, used) = match metadata.encoding {
                 0 => Self::decode_sweep_encoding_0(sweep),
                 1 => Self::decode_sweep_encoding_1(sweep, sweep_len),
@@ -958,10 +968,18 @@ impl FurunoReportReceiver {
                     if sweep_idx == 0 {
                         Self::decode_sweep_encoding_1(sweep, sweep_len)
                     } else {
-                        Self::decode_sweep_encoding_2(sweep, self.prev_spoke.as_slice(), sweep_len)
+                        Self::decode_sweep_encoding_2(
+                            sweep,
+                            self.prev_spoke[range_idx].as_slice(),
+                            sweep_len,
+                        )
                     }
                 }
-                3 => Self::decode_sweep_encoding_3(sweep, self.prev_spoke.as_slice(), sweep_len),
+                3 => Self::decode_sweep_encoding_3(
+                    sweep,
+                    self.prev_spoke[range_idx].as_slice(),
+                    sweep_len,
+                ),
                 _ => {
                     panic!("Impossible encoding value")
                 }
@@ -1003,8 +1021,8 @@ impl FurunoReportReceiver {
                 Self::add_spoke_to_common(&mut self.common, &metadata, angle, heading, &send_spoke);
             }
 
-            self.prev_angle = angle;
-            self.prev_spoke = generic_spoke;
+            self.prev_angle[range_idx] = angle;
+            self.prev_spoke[range_idx] = generic_spoke;
         }
 
         if is_range_b {
@@ -1255,14 +1273,34 @@ impl FurunoReportReceiver {
         let radar_no = (data[15] & 0x40) >> 6;
         let wire_index = (data[12] & 0x3F) as i32;
 
-        let range = super::command::wire_index_to_meters(wire_index).unwrap_or_else(|| {
-            log::warn!(
-                "Unknown wire index {} in spoke header: {:?}",
-                wire_index,
-                &data[0..16]
-            );
-            0
-        });
+        // The radar's active range unit (NM / km) determines which wire-index
+        // table to use: the same wire index means different physical distances
+        // in nautical vs metric mode. Read the unit from the current range
+        // controls; defaults to NM.
+        let wire_unit = self
+            .common
+            .info
+            .controls
+            .get(&crate::radar::settings::ControlId::RangeUnits)
+            .and_then(|c| c.value)
+            .map(|v| {
+                if v as i32 == 1 {
+                    super::command::WIRE_UNIT_KM
+                } else {
+                    super::command::WIRE_UNIT_NM
+                }
+            })
+            .unwrap_or(super::command::WIRE_UNIT_NM);
+        let range = super::command::wire_index_to_meters_for_unit(wire_index, wire_unit)
+            .unwrap_or_else(|| {
+                log::warn!(
+                    "Unknown wire index {} (unit {}) in spoke header: {:?}",
+                    wire_index,
+                    wire_unit,
+                    &data[0..16]
+                );
+                0
+            });
         let range = range as u32;
         let metadata = FurunoSpokeMetadata {
             sweep_count,
