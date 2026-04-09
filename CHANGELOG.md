@@ -51,8 +51,7 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 - Furuno dual range: Range B spoke interleaving is no longer auto-activated at init; it starts after the first explicit Range B range command sent by the client
 - Furuno tune control max increased from 100 to 2000 to accommodate raw radar values
 - Furuno DRS4W: pad short spokes to sweep_len — compressed data on compact WiFi radars can produce fewer samples than expected (#48)
-- Furuno DRS4W: stretch short native spokes (430 samples) to FURUNO_SPOKE_LEN (1024) so that targets render at their correct radial distance instead of being squashed into the inner fraction of the screen (#48)
-- Furuno DRS4W: only stretch the first N samples of each 430-sample spoke, where N is an empirical per-wire-index effective-sample-count table derived from a multi-range dock capture — the DRS4W changes pulse width with range and the tail of the 430-sample wire buffer is beyond-pulse noise (#48)
+- Furuno spoke distance rendering: use the `scale` field from the UDP frame header (bytes 14-15) as the effective sample count instead of `sweep_len`. The radar always transmits `sweep_len` total samples but only the first `scale` of them cover the configured display range — using `sweep_len` caused targets to render at `scale/sweep_len` (~56%) of their true radial distance on all Furuno models (#48)
 - Furuno spoke header: heading_valid now correctly read from byte 11 bit 5 (was reading byte 15 bits 4-5)
 - Furuno spoke header: range wire index masked to 6 bits, angle/heading masked to 13 bits
 - Furuno frequent heartbeat ($NAF) and NN3 diagnostic ($NF5) messages no longer cause log noise
