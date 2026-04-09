@@ -8,20 +8,7 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 
 ## [Unreleased]
 
-### Added
-
-- Navico HALO antenna offset controls (forward/starboard) read from StateProperties and settable via 0xC130
-
-### Changed
-
-- Navico beacon parsing uses dynamic device/service format for all models (BR24, 3G, 4G, HALO)
-- GUI uses numeric input instead of sliders for meter and degree valued controls
-- Emulator loops continuously: boat and targets reverse course when targets leave radar range, then turn back at the starting position (closes #38)
-- Web server listens on IPv6 dual-stack socket, accepting both IPv4 and IPv6 connections
-
-### Removed
-
-- Duplicate protobuf.js library copies in `web/imports/` and `web/protobuf/` (only `web/gui/protobuf/` is used)
+## [3.4.1]
 
 ### Added
 
@@ -34,6 +21,21 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 - Furuno tuning control (auto/manual) for all models that support it
 - New Furuno command IDs: PulseWidth, Tune, TrailMode, RingSuppression, Heartbeat, NN3Command
 - Timed idle (watchman) controls for Furuno NXT radars: on/off toggle and transmit period
+- Navico HALO antenna offset controls (forward/starboard) — read from StateProperties (0xC406) and settable via 0xC130 tag 4
+- Navico spoke positions are now adjusted by the antenna offset (rotated by vessel heading) so ARPA targets appear at the antenna's actual ground position
+- Navico protocol constants collected in a dedicated `protocol.rs` module with named opcode/command/multicast constants
+
+### Changed
+
+- Navico beacon parsing uses dynamic device/service format for all models (BR24, 3G, 4G, HALO) — replaces the previous fixed-size struct discrimination by length
+- Navico state packet structs renamed to match the NRP protocol names (StateMode, StateSetup, StateConfig, StateFeatures, StateProperties, StateInstallation)
+- Navico antenna height now uses i32 (was u16) — matches the wire protocol and supports heights >65 m
+- Navico HALO heading/navigation/speed transmitter rewritten to match the radar_pi reference implementation: correct heading scale (0..0xF800 = 0..360°), correct SOG units (cm/s for navigation, dm/s for speed), separate timers per packet type (heading 100 ms, navigation 250 ms, speed 250 ms), 10-second listen-and-defer timeout
+- GUI uses numeric input instead of sliders for meter and degree valued controls
+- Emulator loops continuously: boat and targets reverse course when targets leave radar range, then turn back at the starting position (closes #38)
+- Web server listens on IPv6 dual-stack socket, accepting both IPv4 and IPv6 connections
+- WebSocket URLs use `wss://` scheme when TLS is enabled
+- Client examples accept `--insecure`/`-k` flag for self-signed certificates (opt-in, no longer default)
 
 ### Fixed
 
@@ -93,10 +95,9 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 - Empty spoke messages no longer broadcast to WebSocket clients
 - Spoke WebSocket stream no longer disconnects on broadcast lag (#31)
 
-### Changed
+### Removed
 
-- WebSocket URLs use `wss://` scheme when TLS is enabled
-- Client examples accept `--insecure`/`-k` flag for self-signed certificates (opt-in, no longer default)
+- Duplicate protobuf.js library copies in `web/imports/` and `web/protobuf/` (only `web/gui/protobuf/` is used)
 
 ## [3.4.0]
 
