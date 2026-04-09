@@ -20,11 +20,29 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 ### Added
 
 - Optional TLS support (`--tls-cert` and `--tls-key` flags) (#36, #37)
-- Furuno DRS4W model detection (#48)
+- Furuno DRS4W model detection and full spoke support (#48)
 - ARPA target tracking documentation (`docs/arpa.md`)
+- Furuno range units support: Nautical (NM) and Metric (km) modes with per-model range tables
+- Furuno dual range support for NXT models: two independent radar instances (Range A/B) with shared TCP/UDP connections
+- Furuno per-model capability system: controls are now enabled based on the detected radar model
+- Furuno tuning control (auto/manual) for all models that support it
+- New Furuno command IDs: PulseWidth, Tune, TrailMode, RingSuppression, Heartbeat, NN3Command
+- Timed idle (watchman) controls for Furuno NXT radars: on/off toggle and transmit period
 
 ### Fixed
 
+- Furuno range zoom was stuck at 1/16 NM (116m) after the closest-match `lookup_wire_index` change: the 125m km-table entry was misclassified as nautical by the metric heuristic and polluted the nautical range list, so zooming out from 116m sent 125m which then mapped back to wire index 21 (116m) — a no-op. 125m is now special-cased as metric
+- Furuno dual range: Route TCP report responses (Status, Gain, Sea, Rain, Tune) to the correct range (A or B) based on dual_range_id in the response
+- Furuno dual range: correct drid field positions for all per-range commands (Status, Gain, Sea, Rain) — verified against live Wireshark captures
+- Furuno dual range: Range response now correctly reads unit from field 1 (was field 2, which is actually drid)
+- Furuno spoke header: dual_range_id is at byte 15 bit 6 (was incorrectly at byte 11 bits 6-7, which are always 0b11)
+- Furuno dual range: Range B spoke interleaving is no longer auto-activated at init; it starts after the first explicit Range B range command sent by the client
+- Furuno tune control max increased from 100 to 2000 to accommodate raw radar values
+- Furuno DRS4W: pad short spokes to sweep_len — compressed data on compact WiFi radars can produce fewer samples than expected (#48)
+- Furuno DRS4W: stretch short native spokes (430 samples) to FURUNO_SPOKE_LEN (883) so that targets render at their correct radial distance instead of being squashed into the inner ~49% of the screen (#48)
+- Furuno spoke header: heading_valid now correctly read from byte 11 bit 5 (was reading byte 15 bits 4-5)
+- Furuno spoke header: range wire index masked to 6 bits, angle/heading masked to 13 bits
+- Furuno frequent heartbeat ($NAF) and NN3 diagnostic ($NF5) messages no longer cause log noise
 - Raymarine HD main bang suppression control was missing, causing error in logs (#35)
 - Multicast reception on multi-homed interfaces (multiple IPs on one NIC) (#51)
 - Furuno range report no longer rejects radars set to km or sm display units

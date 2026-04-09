@@ -19,13 +19,18 @@ pub fn new(
 ) -> SharedControls {
     let mut controls = HashMap::new();
 
+    // Controls present on all Furuno radars. Model-specific controls are added
+    // later in update_when_model_known() based on the capability table.
     new_string(ControlId::UserName)
         .read_only(false)
         .build(&mut controls);
 
-    new_auto(ControlId::Gain, 0., 100., HAS_AUTO_NOT_ADJUSTABLE).build(&mut controls);
-    new_auto(ControlId::Sea, 0., 100., HAS_AUTO_NOT_ADJUSTABLE).build(&mut controls);
-    new_auto(ControlId::Rain, 0., 100., HAS_AUTO_NOT_ADJUSTABLE).build(&mut controls);
+    // Gain/Sea/Rain are added in update_when_model_known() once the model's
+    // auto-capability flags are known. Until the model is detected the default
+    // is a plain numeric control without auto, re-created later.
+    new_numeric(ControlId::Gain, 0., 100.).build(&mut controls);
+    new_numeric(ControlId::Sea, 0., 100.).build(&mut controls);
+    new_numeric(ControlId::Rain, 0., 100.).build(&mut controls);
     new_numeric(ControlId::OperatingTime, 0., 999999999.)
         .read_only(true)
         .wire_units(Units::Seconds)
@@ -36,11 +41,171 @@ pub fn new(
         .build(&mut controls);
 
     new_string(ControlId::SerialNumber).build(&mut controls);
-    new_list(ControlId::ScanSpeed, &["Normal", "Fast", "Auto"]).build(&mut controls);
-    new_numeric(ControlId::MainBangSuppression, 0., 100.).build(&mut controls);
+    new_list(ControlId::RangeUnits, &["Nautical", "Metric"]).build(&mut controls);
 
-    // Furuno is nautical-only - no RangeUnits control, default is already 0 (Nautical)
     SharedControls::new(radar_id, sk_client_tx, args, controls)
+}
+
+/// Per-model capability flags, derived from MaxSea.Radar.dll capability table.
+#[allow(dead_code)]
+struct Capabilities {
+    auto_gain: bool,
+    auto_sea: bool,
+    auto_rain: bool,
+    dual_range: bool,
+    scan_speed: bool,
+    sector_blanking: bool,
+    main_bang_suppression: bool,
+    rez_boost: bool,
+    bird_mode: bool,
+    target_analyzer: bool, // Doppler
+    target_analyzer_rain: bool,
+    noise_rejection: bool,
+    interference_rejection_levels: u8, // 0=none, 2=off/on, 4=off/low/med/high
+    tune: bool,
+    antenna_height: bool,
+    watchman: bool,
+}
+
+fn capabilities(model: &RadarModel) -> Capabilities {
+    match model {
+        // NXT series: full feature set
+        RadarModel::DRS4DNXT
+        | RadarModel::DRS6ANXT
+        | RadarModel::DRS12ANXT
+        | RadarModel::DRS25ANXT => Capabilities {
+            auto_gain: true,
+            auto_sea: true,
+            auto_rain: true,
+            dual_range: true,
+            scan_speed: true,
+            sector_blanking: true,
+            main_bang_suppression: true,
+            rez_boost: true,
+            bird_mode: true,
+            target_analyzer: true,
+            target_analyzer_rain: true,
+            noise_rejection: true,
+            interference_rejection_levels: 2,
+            tune: true,
+            antenna_height: true,
+            watchman: true,
+        },
+        // DRS6A X-Class: DRS + bird mode
+        RadarModel::DRS6AXCLASS => Capabilities {
+            auto_gain: true,
+            auto_sea: true,
+            auto_rain: true,
+            dual_range: false,
+            scan_speed: false,
+            sector_blanking: false,
+            main_bang_suppression: false,
+            rez_boost: false,
+            bird_mode: true,
+            target_analyzer: false,
+            target_analyzer_rain: false,
+            noise_rejection: false,
+            interference_rejection_levels: 0,
+            tune: true,
+            antenna_height: false,
+            watchman: false,
+        },
+        // DRS4DL: limited (no auto gain, no scan speed, no dual range)
+        RadarModel::DRS4DL => Capabilities {
+            auto_gain: false,
+            auto_sea: true,
+            auto_rain: true,
+            dual_range: false,
+            scan_speed: false,
+            sector_blanking: false,
+            main_bang_suppression: false,
+            rez_boost: false,
+            bird_mode: false,
+            target_analyzer: false,
+            target_analyzer_rain: false,
+            noise_rejection: false,
+            interference_rejection_levels: 2,
+            tune: true,
+            antenna_height: false,
+            watchman: false,
+        },
+        // Standard DRS
+        RadarModel::DRS | RadarModel::DRS4W => Capabilities {
+            auto_gain: true,
+            auto_sea: true,
+            auto_rain: true,
+            dual_range: false,
+            scan_speed: false,
+            sector_blanking: false,
+            main_bang_suppression: false,
+            rez_boost: false,
+            bird_mode: false,
+            target_analyzer: false,
+            target_analyzer_rain: false,
+            noise_rejection: false,
+            interference_rejection_levels: 0,
+            tune: true,
+            antenna_height: false,
+            watchman: false,
+        },
+        // FAR series: commercial, 4-level IR, no NXT features
+        RadarModel::FAR21x7 | RadarModel::FAR14x7 | RadarModel::FAR14x6 => Capabilities {
+            auto_gain: false,
+            auto_sea: false,
+            auto_rain: false,
+            dual_range: false,
+            scan_speed: false,
+            sector_blanking: false,
+            main_bang_suppression: false,
+            rez_boost: false,
+            bird_mode: false,
+            target_analyzer: false,
+            target_analyzer_rain: false,
+            noise_rejection: false,
+            interference_rejection_levels: 4,
+            tune: true,
+            antenna_height: false,
+            watchman: false,
+        },
+        // FAR-15x3 / FAR-3000: auto sea/rain, noise rejection
+        RadarModel::FAR15x3 | RadarModel::FAR3000 => Capabilities {
+            auto_gain: false,
+            auto_sea: true,
+            auto_rain: true,
+            dual_range: false,
+            scan_speed: false,
+            sector_blanking: false,
+            main_bang_suppression: false,
+            rez_boost: false,
+            bird_mode: false,
+            target_analyzer: false,
+            target_analyzer_rain: false,
+            noise_rejection: true,
+            interference_rejection_levels: 4,
+            tune: true,
+            antenna_height: false,
+            watchman: false,
+        },
+        // Unknown: basic capabilities
+        RadarModel::Unknown => Capabilities {
+            auto_gain: true,
+            auto_sea: true,
+            auto_rain: true,
+            dual_range: false,
+            scan_speed: false,
+            sector_blanking: false,
+            main_bang_suppression: false,
+            rez_boost: false,
+            bird_mode: false,
+            target_analyzer: false,
+            target_analyzer_rain: false,
+            noise_rejection: false,
+            interference_rejection_levels: 0,
+            tune: true,
+            antenna_height: false,
+            watchman: false,
+        },
+    }
 }
 
 pub fn update_when_model_known(info: &mut RadarInfo, model: RadarModel, version: &str) {
@@ -48,8 +213,6 @@ pub fn update_when_model_known(info: &mut RadarInfo, model: RadarModel, version:
     log::debug!("update_when_model_known: {}", model_name);
     info.controls.set_model_name(model_name.to_string());
 
-    // Update the UserName; it had to be present at start so it could be loaded from
-    // config. Override it if it is still the original 'key' internal name.
     if info.controls.user_name() == info.key() {
         let mut user_name = model_name.to_string();
         if let Some(serial_no) = info.serial_no.as_deref() {
@@ -68,56 +231,122 @@ pub fn update_when_model_known(info: &mut RadarInfo, model: RadarModel, version:
     );
     info.set_ranges(ranges);
 
-    // TODO: Add controls based on reverse engineered capability table
+    let cap = capabilities(&model);
+
+    // Re-create Gain / Sea / Rain with auto flags matching the detected
+    // model's capabilities. The defaults installed in new() were plain
+    // numeric controls because capabilities aren't known at discovery time.
+    if cap.auto_gain {
+        info.controls
+            .add(new_auto(ControlId::Gain, 0., 100., HAS_AUTO_NOT_ADJUSTABLE));
+    } else {
+        info.controls.add(new_numeric(ControlId::Gain, 0., 100.));
+    }
+    if cap.auto_sea {
+        info.controls
+            .add(new_auto(ControlId::Sea, 0., 100., HAS_AUTO_NOT_ADJUSTABLE));
+    } else {
+        info.controls.add(new_numeric(ControlId::Sea, 0., 100.));
+    }
+    if cap.auto_rain {
+        info.controls
+            .add(new_auto(ControlId::Rain, 0., 100., HAS_AUTO_NOT_ADJUSTABLE));
+    } else {
+        info.controls.add(new_numeric(ControlId::Rain, 0., 100.));
+    }
 
     info.controls.add(new_string(ControlId::FirmwareVersion));
     info.controls
         .set_string(&ControlId::FirmwareVersion, version.to_string())
         .expect("FirmwareVersion");
 
-    info.controls.add(
-        new_sector(ControlId::NoTransmitSector1, -180., 180.)
-            .wire_offset(-1.)
-            .wire_units(Units::Degrees)
-            .has_enabled(),
-    );
-    info.controls.add(
-        new_sector(ControlId::NoTransmitSector2, -180., 180.)
-            .wire_offset(-1.)
-            .wire_units(Units::Degrees)
-            .has_enabled(),
-    );
+    // Tuning
+    if cap.tune {
+        info.controls.add(new_auto(
+            ControlId::Tune,
+            0.,
+            2000.,
+            HAS_AUTO_NOT_ADJUSTABLE,
+        ));
+    }
 
-    // Add NXT-specific controls for NXT models
-    if matches!(
-        model,
-        RadarModel::DRS4DNXT | RadarModel::DRS6ANXT | RadarModel::DRS12ANXT | RadarModel::DRS25ANXT
-    ) {
-        info.dual_range = true;
+    // Antenna controls (shared across ranges)
+    if cap.sector_blanking {
+        info.controls.add(
+            new_sector(ControlId::NoTransmitSector1, -180., 180.)
+                .wire_offset(-1.)
+                .wire_units(Units::Degrees)
+                .has_enabled(),
+        );
+        info.controls.add(
+            new_sector(ControlId::NoTransmitSector2, -180., 180.)
+                .wire_offset(-1.)
+                .wire_units(Units::Degrees)
+                .has_enabled(),
+        );
+    }
+    if cap.scan_speed {
+        info.controls
+            .add(new_list(ControlId::ScanSpeed, &["Normal", "Fast", "Auto"]));
+    }
+    if cap.main_bang_suppression {
+        info.controls
+            .add(new_numeric(ControlId::MainBangSuppression, 0., 100.));
+    }
+    if cap.antenna_height {
+        info.controls
+            .add(new_numeric(ControlId::AntennaHeight, 0., 30.).wire_units(Units::Meters));
+    }
 
-        // Noise Reduction (Signal Processing feature 3)
+    // Interference rejection (model-dependent levels)
+    match cap.interference_rejection_levels {
+        2 => {
+            info.controls
+                .add(new_list(ControlId::InterferenceRejection, &["Off", "On"]));
+        }
+        4 => {
+            info.controls.add(new_list(
+                ControlId::InterferenceRejection,
+                &["Off", "Low", "Medium", "High"],
+            ));
+        }
+        _ => {}
+    }
+
+    // NXT-specific per-range features
+    if cap.noise_rejection {
         info.controls
             .add(new_list(ControlId::NoiseRejection, &["Off", "On"]));
-
-        // Interference Rejection (Signal Processing feature 0)
-        info.controls
-            .add(new_list(ControlId::InterferenceRejection, &["Off", "On"]));
-
-        // Target Separation (RezBoost / Beam Sharpening)
+    }
+    if cap.rez_boost {
         info.controls.add(new_list(
             ControlId::TargetSeparation,
             &["Off", "Low", "Medium", "High"],
         ));
-
-        // Bird Mode
+    }
+    if cap.bird_mode {
         info.controls.add(new_list(
             ControlId::BirdMode,
             &["Off", "Low", "Medium", "High"],
         ));
-
-        // Doppler (Target Analyzer): Off, Target, Rain
+    }
+    if cap.target_analyzer {
+        let doppler_options = if cap.target_analyzer_rain {
+            &["Off", "Target", "Rain"] as &[&str]
+        } else {
+            &["Off", "Target"]
+        };
         info.controls
-            .add(new_list(ControlId::Doppler, &["Off", "Target", "Rain"]));
+            .add(new_list(ControlId::Doppler, doppler_options));
+    }
+    if cap.watchman {
+        info.controls
+            .add(new_list(ControlId::TimedIdle, &["Off", "On"]));
+        info.controls
+            .add(new_numeric(ControlId::TimedRun, 10., 120.).wire_units(Units::Seconds));
+    }
+    if cap.dual_range {
+        info.dual_range = true;
     }
 }
 
@@ -169,6 +398,100 @@ static RANGE_TABLE_DRS_NXT_EXTENDED: &[i32] = &[
     177792, // 96 NM
 ];
 
+/// Range table for DRS-NXT series in km mode (in meters)
+/// Ranges: 0.125, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32, 36, 48, 64 km
+/// Note: 0.0625 km is NOT available in km mode for DRS4D-NXT
+static RANGE_TABLE_DRS_NXT_KM: &[i32] = &[
+    125,   // 0.125 km
+    250,   // 0.25 km
+    500,   // 0.5 km
+    750,   // 0.75 km
+    1000,  // 1 km
+    1500,  // 1.5 km
+    2000,  // 2 km
+    3000,  // 3 km
+    4000,  // 4 km
+    6000,  // 6 km
+    8000,  // 8 km
+    12000, // 12 km
+    16000, // 16 km
+    24000, // 24 km
+    32000, // 32 km
+    36000, // 36 km
+    48000, // 48 km
+    64000, // 64 km
+];
+
+/// Extended km range table for DRS12A/DRS25A-NXT (adds 72, 96 km)
+static RANGE_TABLE_DRS_NXT_EXTENDED_KM: &[i32] = &[
+    125,   // 0.125 km
+    250,   // 0.25 km
+    500,   // 0.5 km
+    750,   // 0.75 km
+    1000,  // 1 km
+    1500,  // 1.5 km
+    2000,  // 2 km
+    3000,  // 3 km
+    4000,  // 4 km
+    6000,  // 6 km
+    8000,  // 8 km
+    12000, // 12 km
+    16000, // 16 km
+    24000, // 24 km
+    32000, // 32 km
+    36000, // 36 km
+    48000, // 48 km
+    64000, // 64 km
+    72000, // 72 km
+    96000, // 96 km
+];
+
+/// Range table for standard DRS series in km mode (up to 96 km)
+static RANGE_TABLE_DRS_KM: &[i32] = &[
+    125,   // 0.125 km
+    250,   // 0.25 km
+    500,   // 0.5 km
+    750,   // 0.75 km
+    1000,  // 1 km
+    1500,  // 1.5 km
+    2000,  // 2 km
+    3000,  // 3 km
+    4000,  // 4 km
+    6000,  // 6 km
+    8000,  // 8 km
+    12000, // 12 km
+    16000, // 16 km
+    24000, // 24 km
+    32000, // 32 km
+    36000, // 36 km
+    48000, // 48 km
+    64000, // 64 km
+    72000, // 72 km
+    96000, // 96 km
+];
+
+/// Range table for FAR series in km mode
+/// Missing: 0.0625km, 36km, 64km, 72km (same gaps as NM mode)
+static RANGE_TABLE_FAR_KM: &[i32] = &[
+    125,   // 0.125 km
+    250,   // 0.25 km
+    500,   // 0.5 km
+    750,   // 0.75 km
+    1000,  // 1 km
+    1500,  // 1.5 km
+    2000,  // 2 km
+    3000,  // 3 km
+    4000,  // 4 km
+    6000,  // 6 km
+    8000,  // 8 km
+    12000, // 12 km
+    16000, // 16 km
+    24000, // 24 km
+    32000, // 32 km
+    48000, // 48 km
+    96000, // 96 km
+];
+
 /// Range table for standard DRS series (non-NXT, up to 36 NM)
 static RANGE_TABLE_DRS: &[i32] = &[
     116,   // 1/16 NM
@@ -211,36 +534,45 @@ static RANGE_TABLE_FAR: &[i32] = &[
     177792, // 96 NM
 ];
 
-/// Get the range table for a specific model
+/// Get the combined NM + km range table for a specific model.
+/// Both unit modes are included so the Ranges struct can auto-classify
+/// them into nautical/metric lists for RangeUnits filtering.
 fn get_ranges_by_model(model: &RadarModel) -> Vec<i32> {
-    let range_table: &[i32] = match model {
+    let (nm_table, km_table): (&[i32], &[i32]) = match model {
         // DRS-NXT series with extended ranges
-        RadarModel::DRS12ANXT | RadarModel::DRS25ANXT => RANGE_TABLE_DRS_NXT_EXTENDED,
+        RadarModel::DRS12ANXT | RadarModel::DRS25ANXT => (
+            RANGE_TABLE_DRS_NXT_EXTENDED,
+            RANGE_TABLE_DRS_NXT_EXTENDED_KM,
+        ),
 
         // DRS-NXT series (standard)
-        RadarModel::DRS4DNXT | RadarModel::DRS6ANXT => RANGE_TABLE_DRS_NXT,
+        RadarModel::DRS4DNXT | RadarModel::DRS6ANXT => {
+            (RANGE_TABLE_DRS_NXT, RANGE_TABLE_DRS_NXT_KM)
+        }
 
         // FAR series (commercial radars)
         RadarModel::FAR21x7
         | RadarModel::FAR3000
         | RadarModel::FAR15x3
         | RadarModel::FAR14x6
-        | RadarModel::FAR14x7 => RANGE_TABLE_FAR,
+        | RadarModel::FAR14x7 => (RANGE_TABLE_FAR, RANGE_TABLE_FAR_KM),
 
         // Standard DRS series and unknown models
         RadarModel::Unknown
         | RadarModel::DRS
         | RadarModel::DRS4DL
         | RadarModel::DRS4W
-        | RadarModel::DRS6AXCLASS => RANGE_TABLE_DRS,
+        | RadarModel::DRS6AXCLASS => (RANGE_TABLE_DRS, RANGE_TABLE_DRS_KM),
     };
 
-    let ranges: Vec<i32> = range_table.to_vec();
+    let mut ranges: Vec<i32> = Vec::with_capacity(nm_table.len() + km_table.len());
+    ranges.extend_from_slice(nm_table);
+    ranges.extend_from_slice(km_table);
     log::debug!(
-        "Model {} supports {} ranges: {:?}",
+        "Model {} supports {} NM + {} km ranges",
         model,
-        ranges.len(),
-        ranges
+        nm_table.len(),
+        km_table.len(),
     );
     ranges
 }

@@ -20,11 +20,15 @@ pub(crate) enum CommandId {
     Rain = 0x65,
     CustomPictureAll = 0x66,
     SignalProcessing = 0x67, // Multi-purpose: NoiseReduction, InterferenceRejection, etc.
+    PulseWidth = 0x68,
     Status = 0x69,
     U6D = 0x6D,
     AntennaType = 0x6E,
 
+    Tune = 0x75,
+    TuneIndicator = 0x76,
     BlindSector = 0x77,
+    DRS4WHeartbeat = 0x7D, // DRS4W-specific heartbeat (every ~1s)
 
     Att = 0x80,
     MainBangSize = 0x83,
@@ -32,6 +36,7 @@ pub(crate) enum CommandId {
     NearSTC = 0x85,
     MiddleSTC = 0x86,
     FarSTC = 0x87,
+    RingSuppression = 0x88,
     ScanSpeed = 0x89,
     AntennaSwitch = 0x8A,
     AntennaNo = 0x8D,
@@ -41,13 +46,16 @@ pub(crate) enum CommandId {
     Modules = 0x96,
 
     Drift = 0x9E,
+    TrailMode = 0xA3,
     ConningPosition = 0xAA,
     WakeUpCount = 0xAC,
+    Heartbeat = 0xAF, // $NAF,256 — frequent radar heartbeat
 
     STCRange = 0xD2,
     CustomMemory = 0xD3,
     BuildUpTime = 0xD4,
     DisplayUnitInformation = 0xD5,
+    TrailProcess = 0xE1,
     CustomATFSettings = 0xE0,
     AliveCheck = 0xE3,
     ATFSettings = 0xEA,
@@ -55,56 +63,104 @@ pub(crate) enum CommandId {
     RezBoost = 0xEE,       // Target Separation (beam sharpening)
     TargetAnalyzer = 0xEF, // Doppler mode
     AutoAcquire = 0xF0,
+    NN3Command = 0xF5, // Hardware diagnostics (frequent, read-only)
     RangeSelect = 0xFE,
 }
 
-/// Furuno wire index to meters mapping table
+/// Furuno wire index to meters mapping table (NM mode, wire unit 0)
 /// CRITICAL: Wire indices are NON-SEQUENTIAL! The radar uses specific wire index values.
 /// Verified via Wireshark captures from TimeZero ↔ DRS4D-NXT
 ///
 /// Example: To set 1/16nm range, you send wire_index=21 (NOT 0!)
 ///          To set 36nm range, you send wire_index=19 (NOT 16!)
-pub const WIRE_INDEX_TABLE: [(i32, i32); 18] = [
-    (21, 116),   // 1/16 nm = 116m (minimum range) - wire index 21!
-    (0, 231),    // 1/8 nm = 231m
-    (1, 463),    // 1/4 nm = 463m
-    (2, 926),    // 1/2 nm = 926m
-    (3, 1389),   // 3/4 nm = 1389m
-    (4, 1852),   // 1 nm = 1852m
-    (5, 2778),   // 1.5 nm = 2778m
-    (6, 3704),   // 2 nm = 3704m
-    (7, 5556),   // 3 nm = 5556m
-    (8, 7408),   // 4 nm = 7408m
-    (9, 11112),  // 6 nm = 11112m
-    (10, 14816), // 8 nm = 14816m
-    (11, 22224), // 12 nm = 22224m
-    (12, 29632), // 16 nm = 29632m
-    (13, 44448), // 24 nm = 44448m
-    (14, 59264), // 32 nm = 59264m
-    (19, 66672), // 36 nm = 66672m (OUT OF SEQUENCE! wire index 19!)
-    (15, 88896), // 48 nm = 88896m (maximum range)
+pub const WIRE_INDEX_TABLE: [(i32, i32); 22] = [
+    (21, 116),    // 1/16 nm = 116m - wire index 21!
+    (0, 231),     // 1/8 nm = 231m
+    (1, 463),     // 1/4 nm = 463m
+    (2, 926),     // 1/2 nm = 926m
+    (3, 1389),    // 3/4 nm = 1389m
+    (4, 1852),    // 1 nm = 1852m
+    (5, 2778),    // 1.5 nm = 2778m
+    (6, 3704),    // 2 nm = 3704m
+    (7, 5556),    // 3 nm = 5556m
+    (8, 7408),    // 4 nm = 7408m
+    (9, 11112),   // 6 nm = 11112m
+    (10, 14816),  // 8 nm = 14816m
+    (11, 22224),  // 12 nm = 22224m
+    (12, 29632),  // 16 nm = 29632m
+    (13, 44448),  // 24 nm = 44448m
+    (14, 59264),  // 32 nm = 59264m
+    (19, 66672),  // 36 nm = 66672m (OUT OF SEQUENCE!)
+    (15, 88896),  // 48 nm = 88896m
+    (20, 118528), // 64 nm = 118528m (OUT OF SEQUENCE!)
+    (16, 133344), // 72 nm = 133344m
+    (17, 177792), // 96 nm = 177792m
+    (18, 222240), // 120 nm = 222240m
 ];
 
-/// Convert meters to Furuno wire index
-/// Uses exact match lookup in the WIRE_INDEX_TABLE.
+/// Furuno wire index to meters mapping table (km mode, wire unit 1)
+/// Same wire indices, but range values represent km instead of NM.
+/// Wire index 21 (0.0625) is NOT available in km mode.
+pub const WIRE_INDEX_TABLE_KM: [(i32, i32); 21] = [
+    (0, 125),     // 0.125 km
+    (1, 250),     // 0.25 km
+    (2, 500),     // 0.5 km
+    (3, 750),     // 0.75 km
+    (4, 1000),    // 1 km
+    (5, 1500),    // 1.5 km
+    (6, 2000),    // 2 km
+    (7, 3000),    // 3 km
+    (8, 4000),    // 4 km
+    (9, 6000),    // 6 km
+    (10, 8000),   // 8 km
+    (11, 12000),  // 12 km
+    (12, 16000),  // 16 km
+    (13, 24000),  // 24 km
+    (14, 32000),  // 32 km
+    (19, 36000),  // 36 km (OUT OF SEQUENCE!)
+    (15, 48000),  // 48 km
+    (20, 64000),  // 64 km (OUT OF SEQUENCE!)
+    (16, 72000),  // 72 km
+    (17, 96000),  // 96 km
+    (18, 120000), // 120 km
+];
+
+/// Furuno wire unit values for the range command protocol
+pub const WIRE_UNIT_NM: i32 = 0;
+pub const WIRE_UNIT_KM: i32 = 1;
+// Wire unit 2 = SM (statute miles), 3 = Kyd (kilo-yards) — not yet implemented
+
+/// Convert meters to Furuno wire index, using the NM table.
 pub fn meters_to_wire_index(meters: i32) -> i32 {
-    // Try exact match first
-    for (wire_idx, m) in WIRE_INDEX_TABLE.iter() {
-        if *m == meters {
-            return *wire_idx;
-        }
-    }
-    // If no exact match, find the closest one that's >= requested meters
-    for (wire_idx, m) in WIRE_INDEX_TABLE.iter() {
-        if *m >= meters {
-            return *wire_idx;
-        }
-    }
-    // Fallback to max range (48nm = wire index 15)
-    15
+    lookup_wire_index(&WIRE_INDEX_TABLE, meters)
 }
 
-/// Convert Furuno wire index to meters
+/// Convert meters to Furuno wire index, using the km table.
+pub fn meters_to_wire_index_km(meters: i32) -> i32 {
+    lookup_wire_index(&WIRE_INDEX_TABLE_KM, meters)
+}
+
+/// Convert meters to Furuno wire index using the appropriate table for the wire unit.
+pub fn meters_to_wire_index_for_unit(meters: i32, wire_unit: i32) -> i32 {
+    match wire_unit {
+        WIRE_UNIT_KM => meters_to_wire_index_km(meters),
+        _ => meters_to_wire_index(meters),
+    }
+}
+
+fn lookup_wire_index(table: &[(i32, i32)], meters: i32) -> i32 {
+    // Return the wire index whose range is closest (in absolute distance) to
+    // the requested value. Previously this was a ceiling search which could
+    // jump to a much larger range (e.g. 66672 m would round up to 72 NM
+    // instead of the nearest 64 NM entry).
+    table
+        .iter()
+        .min_by_key(|(_, m)| (i64::from(*m) - i64::from(meters)).abs())
+        .map(|(idx, _)| *idx)
+        .unwrap_or(15)
+}
+
+/// Convert Furuno wire index to meters (NM mode)
 pub fn wire_index_to_meters(wire_index: i32) -> Option<i32> {
     WIRE_INDEX_TABLE
         .iter()
@@ -112,20 +168,56 @@ pub fn wire_index_to_meters(wire_index: i32) -> Option<i32> {
         .map(|(_, meters)| *meters)
 }
 
+/// Convert Furuno wire index to meters (km mode)
+pub fn wire_index_to_meters_km(wire_index: i32) -> Option<i32> {
+    WIRE_INDEX_TABLE_KM
+        .iter()
+        .find(|(idx, _)| *idx == wire_index)
+        .map(|(_, meters)| *meters)
+}
+
+/// Convert Furuno wire index to meters using the appropriate table for the wire unit.
+pub fn wire_index_to_meters_for_unit(wire_index: i32, wire_unit: i32) -> Option<i32> {
+    match wire_unit {
+        WIRE_UNIT_KM => wire_index_to_meters_km(wire_index),
+        _ => wire_index_to_meters(wire_index),
+    }
+}
+
+/// Determine the wire unit for a range value in meters.
+/// Metric distances (km-based) use wire unit 1, nautical use wire unit 0.
+pub fn wire_unit_for_meters(meters: i32) -> i32 {
+    // Check if this is a km-table value by looking for exact match
+    if WIRE_INDEX_TABLE_KM.iter().any(|(_, m)| *m == meters) {
+        // Could be either — check if it's metric (km-based round numbers)
+        if crate::radar::range::Range::is_metric_distance(meters) {
+            return WIRE_UNIT_KM;
+        }
+    }
+    WIRE_UNIT_NM
+}
+
 pub(crate) struct Command {
     key: String,
     write: Option<WriteHalf<TcpStream>>,
     controls: SharedControls,
     ranges: Ranges,
+    /// Dual range ID appended to per-range commands (0 = Range A, 1 = Range B).
+    /// Set by the receiver before each set_control call to target the correct range.
+    pub dual_range_id: i32,
+    /// Whether this radar supports dual range (NXT models).
+    pub has_dual_range: bool,
 }
 
 impl Command {
-    pub fn new(info: &RadarInfo) -> Self {
+    pub fn new(info: &RadarInfo, has_dual_range: bool) -> Self {
         Command {
             key: info.key(),
             write: None,
             controls: info.controls.clone(),
             ranges: info.ranges.clone(),
+            dual_range_id: 0,
+            has_dual_range,
         }
     }
 
@@ -178,6 +270,29 @@ impl Command {
         };
 
         Ok(())
+    }
+
+    fn get_timed_idle_enabled(controls: &SharedControls) -> i32 {
+        controls
+            .get(&ControlId::TimedIdle)
+            .and_then(|c| c.value)
+            .map(|v| v as i32)
+            .unwrap_or(0)
+    }
+
+    fn get_timed_idle_transmit(controls: &SharedControls) -> i32 {
+        controls
+            .get(&ControlId::TimedRun)
+            .and_then(|c| c.value)
+            .map(|v| v as i32)
+            .unwrap_or(60)
+    }
+
+    fn get_timed_idle_standby(controls: &SharedControls) -> i32 {
+        // Standby period = 600 - transmit period (so total cycle stays at 10 minutes)
+        // Clamped to 60..600 range
+        let transmit = Self::get_timed_idle_transmit(controls);
+        (600 - transmit).max(60)
     }
 
     fn get_zone_values(&self, control_id: &ControlId) -> (i32, i32, bool) {
@@ -240,7 +355,7 @@ impl Command {
         self.send(CommandMode::Request, CommandId::TxTime, &[0])
             .await?; // $R8F,0
 
-        // Query current state of all controls
+        // Query current state of all controls (Range A)
         self.send(CommandMode::Request, CommandId::Status, &[])
             .await?; // $R69
 
@@ -255,11 +370,18 @@ impl Command {
         self.send(CommandMode::Request, CommandId::Rain, &[])
             .await?; // $R65
 
-        self.send(CommandMode::Request, CommandId::ScanSpeed, &[])
-            .await?; // $R89
-
-        self.send(CommandMode::Request, CommandId::MainBangSize, &[0, 0])
-            .await?; // $R83,0,0
+        if self.controls.contains_key(&ControlId::Tune) {
+            self.send(CommandMode::Request, CommandId::Tune, &[])
+                .await?; // $R75
+        }
+        if self.controls.contains_key(&ControlId::ScanSpeed) {
+            self.send(CommandMode::Request, CommandId::ScanSpeed, &[])
+                .await?; // $R89
+        }
+        if self.controls.contains_key(&ControlId::MainBangSuppression) {
+            self.send(CommandMode::Request, CommandId::MainBangSize, &[0, 0])
+                .await?; // $R83,0,0
+        }
 
         self.send(CommandMode::Request, CommandId::BlindSector, &[])
             .await?; // $R77
@@ -281,6 +403,11 @@ impl Command {
             self.send(CommandMode::Request, CommandId::TargetAnalyzer, &[])
                 .await?; // $REF - Target Analyzer (Doppler)
         }
+
+        // Note: dual range is NOT activated automatically. The radar only starts
+        // sending Range B spokes after receiving a Range command with drid=1.
+        // This happens when the user sets a range on Range B via the GUI.
+
         Ok(())
     }
 
@@ -299,7 +426,7 @@ impl CommandSender for Command {
     async fn set_control(
         &mut self,
         cv: &ControlValue,
-        _: &SharedControls,
+        controls: &SharedControls,
     ) -> Result<(), RadarError> {
         let value = cv.as_i32()?;
         let auto: i32 = if cv.auto.unwrap_or(false) { 1 } else { 0 };
@@ -311,59 +438,124 @@ impl CommandSender for Command {
 
         let id: CommandId = match cv.id {
             ControlId::Power => {
+                // Wire format: $S69,{status},{drid},{wman},{w_send},{w_stop},0
                 let value = match Power::from_value(&cv.as_value()?).unwrap_or(Power::Standby) {
                     Power::Transmit => 2,
                     _ => 1,
                 };
 
+                let wman = Self::get_timed_idle_enabled(controls);
+                let w_send = Self::get_timed_idle_transmit(controls);
+                let w_stop = Self::get_timed_idle_standby(controls);
+
                 cmd.push(value); // status
+                cmd.push(self.dual_range_id);
+                cmd.push(wman);
+                cmd.push(w_send);
+                cmd.push(w_stop);
                 cmd.push(0);
-                cmd.push(0); // WatchMan on/off
-                cmd.push(60); // Watchman On time?
-                cmd.push(300); // Watchman Off time?
-                cmd.push(0); // Always 0
+
+                CommandId::Status
+            }
+
+            ControlId::TimedIdle | ControlId::TimedRun => {
+                // Resend the Status command with updated watchman settings.
+                // Wire format: $S69,{status},{drid},{wman},{w_send},{w_stop},0
+                let power = controls
+                    .get(&ControlId::Power)
+                    .and_then(|c| c.value)
+                    .map(|v| v as i32)
+                    .unwrap_or(Power::Standby as i32);
+                let status = if power == Power::Transmit as i32 {
+                    2
+                } else {
+                    1
+                };
+
+                let wman = if cv.id == ControlId::TimedIdle {
+                    value // the new value being set
+                } else {
+                    Self::get_timed_idle_enabled(controls)
+                };
+                let w_send = if cv.id == ControlId::TimedRun {
+                    value
+                } else {
+                    Self::get_timed_idle_transmit(controls)
+                };
+                let w_stop = (600 - w_send).max(60);
+
+                cmd.push(status);
+                cmd.push(self.dual_range_id);
+                cmd.push(wman);
+                cmd.push(w_send);
+                cmd.push(w_stop);
+                cmd.push(0);
 
                 CommandId::Status
             }
 
             ControlId::Range => {
-                // CRITICAL: Must use wire index, not array position!
-                // Wire indices are non-sequential (21=min, 0-15=normal, 19=36nm out of order)
-                let wire_index = meters_to_wire_index(value);
+                // Determine wire unit from the range value (metric vs nautical)
+                let wire_unit = wire_unit_for_meters(value);
+                let wire_index = meters_to_wire_index_for_unit(value, wire_unit);
                 cmd.push(wire_index);
-                cmd.push(0);
-                cmd.push(0);
+                cmd.push(wire_unit);
+                cmd.push(self.dual_range_id);
+                CommandId::Range
+            }
+
+            ControlId::RangeUnits => {
+                // When changing range units, re-send the current range with the new unit.
+                // The radar firmware reinterprets the range index in the new unit context.
+                // value: 0=Nautical, 1=Metric
+                let wire_unit = if value == 1 {
+                    WIRE_UNIT_KM
+                } else {
+                    WIRE_UNIT_NM
+                };
+
+                // Get the current range in meters from the target range's
+                // controls (not self.controls, which is Range A's handle and
+                // would be wrong when the unit change is targeting Range B).
+                let current_range = controls
+                    .get(&ControlId::Range)
+                    .and_then(|c| c.value)
+                    .map(|v| v as i32)
+                    .unwrap_or(11112); // default 6 NM
+
+                // Find the closest range in the new unit's wire table
+                let wire_index = meters_to_wire_index_for_unit(current_range, wire_unit);
+                cmd.push(wire_index);
+                cmd.push(wire_unit);
+                cmd.push(self.dual_range_id);
                 CommandId::Range
             }
 
             ControlId::Gain => {
-                // Format: $S63,{auto},{value},0,80,0
-                // From pcap: $S63,0,50,0,80,0 (manual, value=50)
+                // Per-range: $S63,{auto},{value},{drid},{auto_val},0
                 cmd.push(auto);
                 cmd.push(value);
-                cmd.push(0);
+                cmd.push(self.dual_range_id);
                 cmd.push(80);
                 cmd.push(0);
                 CommandId::Gain
             }
             ControlId::Sea => {
-                // Format: $S64,{auto},{value},50,0,0,0
-                // From pcap: $S64,{auto},{value},50,0,0,0
+                // Per-range: $S64,{auto},{value},{auto_val},{drid},0,0
                 cmd.push(auto);
                 cmd.push(value);
                 cmd.push(50);
-                cmd.push(0);
+                cmd.push(self.dual_range_id);
                 cmd.push(0);
                 cmd.push(0);
                 CommandId::Sea
             }
             ControlId::Rain => {
-                // Format: $S65,{auto},{value},0,0,0,0
-                // From pcap: $S65,{auto},{value},0,0,0,0
+                // Per-range: $S65,{auto},{value},0,{drid},0,0
                 cmd.push(auto);
                 cmd.push(value);
                 cmd.push(0);
-                cmd.push(0);
+                cmd.push(self.dual_range_id);
                 cmd.push(0);
                 cmd.push(0);
                 CommandId::Rain
@@ -388,6 +580,13 @@ impl CommandSender for Command {
                 cmd.push(value);
                 cmd.push(0);
                 CommandId::ScanSpeed
+            }
+            ControlId::Tune => {
+                // Per-range: $S75,{auto},{value},{dual_range_id}
+                cmd.push(auto);
+                cmd.push(value);
+                cmd.push(self.dual_range_id);
+                CommandId::Tune
             }
             ControlId::AntennaHeight => {
                 // Format: $S84,0,{meters},0

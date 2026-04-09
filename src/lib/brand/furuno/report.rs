@@ -40,10 +40,13 @@ struct FurunoSpokeMetadata {
     encoding: u8,
     have_heading: u8,
     range: u32,
+    radar_no: u8, // 0 = Range A, 1 = Range B (dual range)
 }
 
 pub struct FurunoReportReceiver {
     common: CommonRadar,
+    /// Second CommonRadar for Range B in dual range mode.
+    common_b: Option<CommonRadar>,
     stream: Option<TcpStream>,
     command_sender: Option<Command>,
     report_request_interval: Duration,
@@ -53,9 +56,12 @@ pub struct FurunoReportReceiver {
     multicast_socket: Option<UdpSocket>,
     broadcast_socket: Option<UdpSocket>,
 
-    // pixel_to_blob: [[u8; BYTE_LOOKUP_LENGTH]; LOOKUP_SPOKE_LENGTH],
-    prev_spoke: Vec<u8>,
-    prev_angle: u16,
+    // Delta-decoding state kept per range (index 0 = A, 1 = B) because
+    // dual-range interleaves two independent spoke streams on the same UDP
+    // socket. Sharing a single prev_spoke across A/B would corrupt the first
+    // delta-decoded spoke after every switch.
+    prev_spoke: [Vec<u8>; 2],
+    prev_angle: [u16; 2],
 }
 
 impl FurunoReportReceiver {
@@ -64,13 +70,11 @@ impl FurunoReportReceiver {
         let command_sender = if args.replay {
             None
         } else {
-            Some(Command::new(&info))
+            Some(Command::new(&info, false))
         };
 
         let control_update_rx = info.control_update_subscribe();
         let blob_tx = radars.get_blob_tx();
-
-        // let pixel_to_blob = Self::pixel_to_blob(&info.legend);
 
         let common = CommonRadar::new(
             args,
@@ -84,6 +88,7 @@ impl FurunoReportReceiver {
 
         FurunoReportReceiver {
             common,
+            common_b: None,
             stream: None,
             command_sender,
             report_request_interval: Duration::from_millis(5000),
@@ -91,8 +96,29 @@ impl FurunoReportReceiver {
             receive_type: ReceiveAddressType::Both,
             multicast_socket: None,
             broadcast_socket: None,
-            prev_spoke: Vec::new(),
-            prev_angle: 0,
+            prev_spoke: [Vec::new(), Vec::new()],
+            prev_angle: [0, 0],
+        }
+    }
+
+    /// Set the Range B RadarInfo for dual range mode.
+    pub fn set_range_b(&mut self, args: &Cli, radars: &SharedRadars, info_b: RadarInfo) {
+        let key_b = info_b.key();
+        let control_update_rx_b = info_b.control_update_subscribe();
+        let blob_tx_b = radars.get_blob_tx();
+
+        self.common_b = Some(CommonRadar::new(
+            args,
+            key_b,
+            info_b,
+            radars.clone(),
+            control_update_rx_b,
+            args.replay,
+            blob_tx_b,
+        ));
+
+        if let Some(ref mut cs) = self.command_sender {
+            cs.has_dual_range = true;
         }
     }
 
@@ -185,8 +211,35 @@ impl FurunoReportReceiver {
                     match r {
                         Err(_) => {},
                         Ok(cv) => {
+                            // Range A control update: set dual_range_id=0
+                            if let Some(ref mut cs) = self.command_sender {
+                                cs.dual_range_id = 0;
+                            }
                             if let Err(e) = self.common.process_control_update( cv, &mut self.command_sender).await {
                                 return Err(e);
+                            }
+                        },
+                    }
+                },
+
+                Some(r) = async {
+                    if let Some(ref mut cb) = self.common_b {
+                        Some(cb.control_update_rx.recv().await)
+                    } else {
+                        std::future::pending::<Option<_>>().await
+                    }
+                } => {
+                    match r {
+                        Err(_) => {},
+                        Ok(cv) => {
+                            // Range B control update: set dual_range_id=1
+                            if let Some(ref mut cs) = self.command_sender {
+                                cs.dual_range_id = 1;
+                            }
+                            if let Some(ref mut cb) = self.common_b {
+                                if let Err(e) = cb.process_control_update(cv, &mut self.command_sender).await {
+                                    return Err(e);
+                                }
                             }
                         },
                     }
@@ -286,6 +339,55 @@ impl FurunoReportReceiver {
         Ok(())
     }
 
+    /// Return a mutable reference to the CommonRadar for the given dual range ID.
+    /// `drid` 0 = Range A (self.common), `drid` 1 = Range B (self.common_b).
+    /// Falls back to Range A if Range B is not configured.
+    fn common_for_range(&mut self, drid: u8) -> &mut CommonRadar {
+        if drid == 1 {
+            if let Some(ref mut cb) = self.common_b {
+                return cb;
+            }
+        }
+        &mut self.common
+    }
+
+    /// Extract the dual range ID from a per-range response.
+    /// Verified against live Wireshark captures from DRS4D-NXT with TimeZero.
+    /// The drid position varies per command:
+    ///   Status: $N69,{status},{drid},{wman},{w_send},{w_stop},0 — index 1
+    ///   Gain:   $N63,{auto},{val},{drid},{auto_val},0            — index 2
+    ///   Sea:    $N64,{auto},{val},{auto_val},{drid},0,0          — index 3
+    ///   Rain:   $N65,{auto},{val},0,{drid},0,0                  — index 3
+    ///   Range:  $N62,{wire_idx},{unit},{drid}                    — index 2
+    ///   Tune:   $N75,{auto},{value},{drid}                       — index 2
+    fn extract_drid(&self, command_id: &CommandId, numbers: &[f64]) -> u8 {
+        if self.common_b.is_none() {
+            return 0;
+        }
+        let drid = match command_id {
+            CommandId::Status => {
+                // $N69,{status},{drid},{wman},{w_send},{w_stop},0
+                numbers.get(1).copied().unwrap_or(0.0)
+            }
+            CommandId::Gain | CommandId::Range | CommandId::Tune => {
+                // $N63,{auto},{val},{drid},{auto_val},0
+                // $N62,{wire_idx},{unit},{drid}
+                // $N75,{auto},{value},{drid}
+                numbers.get(2).copied().unwrap_or(0.0)
+            }
+            CommandId::Sea | CommandId::Rain => {
+                // $N64,{auto},{val},{auto_val},{drid},0,0
+                // $N65,{auto},{val},0,{drid},0,0
+                numbers.get(3).copied().unwrap_or(0.0)
+            }
+            _ => {
+                // Unknown commands: assume last field
+                numbers.last().copied().unwrap_or(0.0)
+            }
+        };
+        drid as u8
+    }
+
     fn process_report(&mut self, line: &str) -> Result<(), Error> {
         let line = match line.find('$') {
             Some(pos) => {
@@ -363,6 +465,7 @@ impl FurunoReportReceiver {
             }
 
             CommandId::Status => {
+                // Response format: $N69,{status},{drid},{wman},{w_send},{w_stop},0
                 if numbers.len() < 1 {
                     bail!("No arguments for Status command");
                 }
@@ -373,14 +476,32 @@ impl FurunoReportReceiver {
                     3. => Power::Off,
                     _ => Power::Off,
                 };
-                // TODO check values with generic values [1 = Standby, 2 = Transmit but the others...]
-                self.common
-                    .set_value(&ControlId::Power, generic_state as i32 as f64);
+
+                let power_value = generic_state as i32 as f64;
+                let drid = self.extract_drid(&command_id, &numbers);
+                let target = self.common_for_range(drid);
+                target.set_value(&ControlId::Power, power_value);
+
+                if numbers.len() >= 5 {
+                    let wman = numbers[2] as i32;
+                    let w_send = numbers[3];
+                    target.set_value(&ControlId::TimedIdle, wman as f64);
+                    target.set_value(&ControlId::TimedRun, w_send);
+                }
+
+                // Coupled transmit: on DRS models both ranges share TX state.
+                // Propagate power to the other range.
+                if self.common_b.is_some() {
+                    let other = if drid == 1 {
+                        &mut self.common
+                    } else {
+                        self.common_b.as_mut().unwrap()
+                    };
+                    other.set_value(&ControlId::Power, power_value);
+                }
             }
             CommandId::Gain => {
-                // Response format: $N63,{auto},{value},0,80,0
-                // auto=0: Manual, auto=1: Auto
-                // value: 0-100
+                // Response format: $N63,{auto},{val},{screen},{auto_val},{drid}
                 if numbers.len() < 2 {
                     bail!(
                         "Insufficient ({}) arguments for Gain command",
@@ -389,19 +510,23 @@ impl FurunoReportReceiver {
                 }
                 let auto = numbers[0] as u8;
                 let gain = numbers[1];
-                self.common.set_value_auto(&ControlId::Gain, gain, auto);
+                let drid = self.extract_drid(&command_id, &numbers);
+                self.common_for_range(drid)
+                    .set_value_auto(&ControlId::Gain, gain, auto);
             }
             CommandId::Sea => {
-                // Response format: $N64,{auto},{value},50,0,0,0
+                // Response format: $N64,{auto},{val},{auto_val},{screen},0,{drid}
                 if numbers.len() < 2 {
                     bail!("Insufficient ({}) arguments for Sea command", numbers.len());
                 }
                 let auto = numbers[0] as u8;
                 let sea = numbers[1];
-                self.common.set_value_auto(&ControlId::Sea, sea, auto);
+                let drid = self.extract_drid(&command_id, &numbers);
+                self.common_for_range(drid)
+                    .set_value_auto(&ControlId::Sea, sea, auto);
             }
             CommandId::Rain => {
-                // Response format: $N65,{auto},{value},0,0,0,0
+                // Response format: $N65,{auto},{val},0,{screen},{drid},0
                 if numbers.len() < 2 {
                     bail!(
                         "Insufficient ({}) arguments for Rain command",
@@ -410,7 +535,9 @@ impl FurunoReportReceiver {
                 }
                 let auto = numbers[0] as u8;
                 let rain = numbers[1];
-                self.common.set_value_auto(&ControlId::Rain, rain, auto);
+                let drid = self.extract_drid(&command_id, &numbers);
+                self.common_for_range(drid)
+                    .set_value_auto(&ControlId::Rain, rain, auto);
             }
             CommandId::ScanSpeed => {
                 // Response format: $N89,{mode},0
@@ -459,27 +586,33 @@ impl FurunoReportReceiver {
                 );
             }
             CommandId::Range => {
+                // Response format: $N62,{wire_idx},{unit},{drid}
+                // Confirmed from capture: $N62,10,0,1 = wire_idx=10, unit=0(NM), drid=1(B)
                 if numbers.len() < 3 {
                     bail!(
                         "Insufficient ({}) arguments for Range command",
                         numbers.len()
                     );
                 }
-                // CRITICAL: numbers[0] is a WIRE INDEX (non-sequential: 21, 0-15, 19)
-                // NOT an array position! Must convert to meters first.
-                // numbers[2] is the display unit (0=NM, 1=km, 2=sm) but the wire
-                // index maps to meters regardless of display unit.
                 let wire_index = numbers[0] as i32;
+                let wire_unit = numbers[1] as i32;
                 let range_meters =
-                    super::command::wire_index_to_meters(wire_index).with_context(|| {
-                        format!(
-                            "Unknown wire index {} from radar range response",
-                            wire_index
-                        )
-                    })?;
+                    super::command::wire_index_to_meters_for_unit(wire_index, wire_unit)
+                        .with_context(|| {
+                            format!(
+                                "Unknown wire index {} (unit {}) from radar range response",
+                                wire_index, wire_unit
+                            )
+                        })?;
 
-                self.common
-                    .set_value(&ControlId::Range, range_meters as f64);
+                let drid = self.extract_drid(&command_id, &numbers);
+                let range_units_value = match wire_unit {
+                    super::command::WIRE_UNIT_KM => 1.0, // Metric
+                    _ => 0.0,                            // Nautical
+                };
+                let target = self.common_for_range(drid);
+                target.set_value(&ControlId::Range, range_meters as f64);
+                target.set_value(&ControlId::RangeUnits, range_units_value);
             }
             CommandId::OnTime => {
                 let seconds = numbers[0];
@@ -592,9 +725,42 @@ impl FurunoReportReceiver {
                 self.common.set_value(&ControlId::Doppler, value);
             }
 
-            CommandId::AliveCheck => {}
+            CommandId::Tune => {
+                // Response format: $N75,{auto},{value},{screen}
+                // screen is drid for dual range
+                if numbers.len() >= 2 {
+                    let auto = numbers[0] as u8;
+                    let tune = numbers[1];
+                    let drid = self.extract_drid(&command_id, &numbers);
+                    self.common_for_range(drid)
+                        .set_value_auto(&ControlId::Tune, tune, auto);
+                }
+            }
+
+            // Silently handled (no state to update)
+            CommandId::AliveCheck
+            | CommandId::Heartbeat
+            | CommandId::NN3Command
+            | CommandId::CustomPictureAll
+            | CommandId::AntennaType
+            | CommandId::DispMode
+            | CommandId::PulseWidth
+            | CommandId::RingSuppression
+            | CommandId::TrailMode
+            | CommandId::TrailProcess
+            | CommandId::CustomATFSettings
+            | CommandId::ATFSettings
+            | CommandId::AutoAcquire
+            | CommandId::TuneIndicator
+            | CommandId::DRS4WHeartbeat => {}
+
             _ => {
-                bail!("TODO: Handle command {:?} values {:?}", command_id, numbers);
+                log::debug!(
+                    "{}: unhandled command {:?} values {:?}",
+                    self.common.key,
+                    command_id,
+                    numbers
+                );
             }
         }
         Ok(())
@@ -625,6 +791,12 @@ impl FurunoReportReceiver {
                 cs.set_ranges(self.common.info.ranges.clone());
             }
             self.common.update();
+
+            // Also update Range B if present
+            if let Some(ref mut cb) = self.common_b {
+                settings::update_when_model_known(&mut cb.info, model, version);
+                cb.update();
+            }
             return;
         }
         log::error!(
@@ -764,9 +936,19 @@ impl FurunoReportReceiver {
 
         let sweep_count = metadata.sweep_count;
         let sweep_len = metadata.sweep_len as usize;
-        log::debug!("Received UDP frame with {} spokes", sweep_count,);
+        let is_range_b = metadata.radar_no == 1 && self.common_b.is_some();
 
-        self.common.new_spoke_message();
+        log::debug!(
+            "Received UDP frame with {} spokes (range {})",
+            sweep_count,
+            if is_range_b { "B" } else { "A" }
+        );
+
+        if is_range_b {
+            self.common_b.as_mut().unwrap().new_spoke_message();
+        } else {
+            self.common.new_spoke_message();
+        }
 
         let mut sweep: &[u8] = &data[16..];
         for sweep_idx in 0..sweep_count {
@@ -774,34 +956,80 @@ impl FurunoReportReceiver {
                 log::error!("Unsufficient data for sweep {}", sweep_idx);
                 break;
             }
-            let angle = ((sweep[1] as u16) << 8) | sweep[0] as u16;
-            let heading = ((sweep[3] as u16) << 8) | sweep[2] as u16;
+            let angle = (((sweep[1] & 0x1F) as u16) << 8) | sweep[0] as u16;
+            let heading = (((sweep[3] & 0x1F) as u16) << 8) | sweep[2] as u16;
             sweep = &sweep[4..];
 
-            let (generic_spoke, used) = match metadata.encoding {
+            let range_idx = if is_range_b { 1 } else { 0 };
+            let (mut generic_spoke, used) = match metadata.encoding {
                 0 => Self::decode_sweep_encoding_0(sweep),
                 1 => Self::decode_sweep_encoding_1(sweep, sweep_len),
                 2 => {
                     if sweep_idx == 0 {
                         Self::decode_sweep_encoding_1(sweep, sweep_len)
                     } else {
-                        Self::decode_sweep_encoding_2(sweep, self.prev_spoke.as_slice(), sweep_len)
+                        Self::decode_sweep_encoding_2(
+                            sweep,
+                            self.prev_spoke[range_idx].as_slice(),
+                            sweep_len,
+                        )
                     }
                 }
-                3 => Self::decode_sweep_encoding_3(sweep, self.prev_spoke.as_slice(), sweep_len),
+                3 => Self::decode_sweep_encoding_3(
+                    sweep,
+                    self.prev_spoke[range_idx].as_slice(),
+                    sweep_len,
+                ),
                 _ => {
                     panic!("Impossible encoding value")
                 }
             };
+
+            // Pad short spokes to sweep_len with zeros. This happens on radars
+            // with compact compressed data (e.g., DRS4W) where the decompressor
+            // runs out of input before producing sweep_len samples. The missing
+            // samples represent zero-return (empty) pixels.
+            if generic_spoke.len() < sweep_len {
+                generic_spoke.resize(sweep_len, 0);
+            }
+
             sweep = &sweep[used..];
 
-            self.add_spoke_to_message(&metadata, angle, heading, &generic_spoke);
+            // The GUI buffers each angle in a slot of FURUNO_SPOKE_LEN samples and
+            // treats that whole slot as covering the spoke's reported physical range.
+            // Radars whose native sweep_len is smaller than FURUNO_SPOKE_LEN (e.g.
+            // DRS4W with sweep_len=430 vs FURUNO_SPOKE_LEN=883) would have their data
+            // confined to the inner sweep_len/FURUNO_SPOKE_LEN fraction of the screen,
+            // making targets appear much closer to own ship than they really are.
+            // Stretch shorter spokes to FURUNO_SPOKE_LEN by nearest-neighbour so that
+            // sample_i represents physical distance i/FURUNO_SPOKE_LEN * range.
+            let send_spoke: Vec<u8> = if generic_spoke.len() < FURUNO_SPOKE_LEN {
+                Self::stretch_spoke(&generic_spoke, FURUNO_SPOKE_LEN)
+            } else {
+                generic_spoke.clone()
+            };
 
-            self.prev_angle = angle;
-            self.prev_spoke = generic_spoke;
+            if is_range_b {
+                Self::add_spoke_to_common(
+                    self.common_b.as_mut().unwrap(),
+                    &metadata,
+                    angle,
+                    heading,
+                    &send_spoke,
+                );
+            } else {
+                Self::add_spoke_to_common(&mut self.common, &metadata, angle, heading, &send_spoke);
+            }
+
+            self.prev_angle[range_idx] = angle;
+            self.prev_spoke[range_idx] = generic_spoke;
         }
 
-        self.common.send_spoke_message();
+        if is_range_b {
+            self.common_b.as_mut().unwrap().send_spoke_message();
+        } else {
+            self.common.send_spoke_message();
+        }
     }
 
     fn decode_sweep_encoding_0(sweep: &[u8]) -> (Vec<u8>, usize) {
@@ -914,26 +1142,47 @@ impl FurunoReportReceiver {
         (spoke, used)
     }
 
-    fn add_spoke_to_message(
-        &mut self,
+    /// Stretch a decoded spoke from `src.len()` samples to `dst_len` samples
+    /// using nearest-neighbour interpolation. Used to upscale short native spokes
+    /// (e.g. DRS4W's 430) to the GUI's expected slot size (FURUNO_SPOKE_LEN=883),
+    /// so that sample i represents physical distance `i / dst_len * range`
+    /// regardless of the radar's native bin count. Without this, GUI buffers
+    /// would zero-fill the unused tail and confine real returns to the inner
+    /// `src.len() / dst_len` fraction of the screen.
+    fn stretch_spoke(src: &[u8], dst_len: usize) -> Vec<u8> {
+        if src.is_empty() || dst_len == 0 {
+            return vec![0; dst_len];
+        }
+        if src.len() >= dst_len {
+            return src[..dst_len].to_vec();
+        }
+        let src_len = src.len();
+        let mut out = vec![0u8; dst_len];
+        for i in 0..dst_len {
+            let j = (i * src_len) / dst_len;
+            out[i] = src[j];
+        }
+        out
+    }
+
+    fn add_spoke_to_common(
+        common: &mut CommonRadar,
         metadata: &FurunoSpokeMetadata,
         angle: SpokeBearing,
         heading: SpokeBearing,
         sweep: &[u8],
     ) {
-        if self.common.replay {
-            let _ = self
-                .common
+        if common.replay {
+            let _ = common
                 .info
                 .controls
                 .set(&ControlId::Range, metadata.range as f64, None);
-            let _ = self.common.info.controls.set(
-                &ControlId::Power,
-                Power::Transmit as u32 as f64,
-                None,
-            );
+            let _ =
+                common
+                    .info
+                    .controls
+                    .set(&ControlId::Power, Power::Transmit as u32 as f64, None);
         }
-        // Convert the spoke data to bytes
 
         let heading: Option<u16> = if metadata.have_heading > 0 {
             Some(heading as u16)
@@ -949,7 +1198,7 @@ impl FurunoReportReceiver {
             data[i] = b >> 2;
             i += 1;
         }
-        if self.common.replay {
+        if common.replay {
             data[sweep.len() - 1] = 64;
         }
 
@@ -960,7 +1209,7 @@ impl FurunoReportReceiver {
             PrintableSpoke::new(&data)
         );
 
-        self.common.add_spoke(metadata.range, angle, heading, data);
+        common.add_spoke(metadata.range, angle, heading, data);
     }
 
     // From RadarDLLAccess RmGetEchoData() we know that the following should be in the header:
@@ -993,27 +1242,71 @@ impl FurunoReportReceiver {
     // [2, 250, 0, 1, 0, 0, 0, 0, 36, 49, 116, 59, 0, 0, 240, 9]
 
     fn parse_metadata_header(&self, data: &[u8]) -> FurunoSpokeMetadata {
-        // Extract all the fields from the header
-        let v1 = (data[8] as u32 + (data[9] as u32 & 0x01) * 256) * 4 + 4;
+        // Frame header layout (16 bytes), derived from radar.dll disassembly:
+        //
+        // Bytes 0-7: Packet header
+        //   [0]    packet_type (always 0x02)
+        //   [1]    sequence_number
+        //   [2-3]  total_length (big-endian)
+        //   [4-7]  timestamp (little-endian u32)
+        //
+        // Bytes 8-11: Sweep metadata
+        //   [8]    spoke_data_len low byte
+        //   [9]    bit 0: spoke_data_len high bit; bits 1-7: spoke_count
+        //   [10]   sample_count low byte
+        //   [11]   bits 0-2: sample_count high; bits 3-4: encoding;
+        //          bit 5: heading_valid; bits 6-7: unknown (observed as 0b11)
+        //
+        // Bytes 12-15: Range and status
+        //   [12]   bits 0-5: range wire index; bits 6-7: range_status
+        //   [13]   range resolution metadata
+        //   [14]   range_value low byte
+        //   [15]   bits 0-2: range_value high; bit 3: flag;
+        //          bits 4-5: echo_type; bit 6: dual_range_id (0=A, 1=B);
+        //          bit 7: unknown
+
+        let _spoke_data_len = (data[8] as u32 + (data[9] as u32 & 0x01) * 256) * 4 + 4;
         let sweep_count = (data[9] >> 1) as u32;
         let sweep_len = ((data[11] & 0x07) as u32) << 8 | data[10] as u32;
         let encoding = (data[11] & 0x18) >> 3;
-        let v2 = (data[11] & 0x20) >> 5;
-        let v3 = (data[11] & 0xc0) >> 6;
-        // CRITICAL: data[12] is a WIRE INDEX (non-sequential: 21, 0-15, 19)
-        // NOT an array position! Must convert to meters.
-        let wire_index = data[12] as i32;
-        let have_heading = ((data[15] & 0x30) >> 3) as u8;
+        let have_heading = (data[11] & 0x20) >> 5;
+        let radar_no = (data[15] & 0x40) >> 6;
+        let wire_index = (data[12] & 0x3F) as i32;
 
-        // Now do stuff with the data
-        let range = super::command::wire_index_to_meters(wire_index).unwrap_or_else(|| {
-            log::warn!(
-                "Unknown wire index {} in spoke header: {:?}",
-                wire_index,
-                &data[0..20]
-            );
-            0
-        });
+        // The radar's active range unit (NM / km) determines which wire-index
+        // table to use: the same wire index means different physical distances
+        // in nautical vs metric mode. Read RangeUnits from the controls that
+        // belong to the specific range this spoke is for — Range A and Range B
+        // can be configured with different units.
+        let range_controls = if radar_no == 1 {
+            self.common_b
+                .as_ref()
+                .map(|cb| &cb.info.controls)
+                .unwrap_or(&self.common.info.controls)
+        } else {
+            &self.common.info.controls
+        };
+        let wire_unit = range_controls
+            .get(&crate::radar::settings::ControlId::RangeUnits)
+            .and_then(|c| c.value)
+            .map(|v| {
+                if v as i32 == 1 {
+                    super::command::WIRE_UNIT_KM
+                } else {
+                    super::command::WIRE_UNIT_NM
+                }
+            })
+            .unwrap_or(super::command::WIRE_UNIT_NM);
+        let range = super::command::wire_index_to_meters_for_unit(wire_index, wire_unit)
+            .unwrap_or_else(|| {
+                log::warn!(
+                    "Unknown wire index {} (unit {}) in spoke header: {:?}",
+                    wire_index,
+                    wire_unit,
+                    &data[0..16]
+                );
+                0
+            });
         let range = range as u32;
         let metadata = FurunoSpokeMetadata {
             sweep_count,
@@ -1021,15 +1314,17 @@ impl FurunoReportReceiver {
             encoding,
             have_heading,
             range,
+            radar_no,
         };
         log::trace!(
-            "header {:?} -> v1={v1}, v2={v2}, v3={v3}, sweep_count={} sweep_len={} encoding={} have_heading={} range={}",
-            &data[0..20],
+            "header {:?} -> sweep_count={} sweep_len={} encoding={} have_heading={} range={} radar_no={}",
+            &data[0..16],
             sweep_count,
             sweep_len,
             encoding,
             have_heading,
-            range
+            range,
+            radar_no,
         );
 
         metadata
