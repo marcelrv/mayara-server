@@ -31,6 +31,7 @@ Sections can be: Added Changed Deprecated Removed Fixed Security.
 
 ### Fixed
 
+- Furuno range zoom was stuck at 1/16 NM (116m) after the closest-match `lookup_wire_index` change: the 125m km-table entry was misclassified as nautical by the metric heuristic and polluted the nautical range list, so zooming out from 116m sent 125m which then mapped back to wire index 21 (116m) — a no-op. 125m is now special-cased as metric
 - Furuno dual range: Route TCP report responses (Status, Gain, Sea, Rain, Tune) to the correct range (A or B) based on dual_range_id in the response
 - Furuno dual range: correct drid field positions for all per-range commands (Status, Gain, Sea, Rain) — verified against live Wireshark captures
 - Furuno dual range: Range response now correctly reads unit from field 1 (was field 2, which is actually drid)

@@ -115,6 +115,16 @@ impl Range {
     }
 
     fn metric(v: i32) -> bool {
+        // 125m is the "0.125 km" first entry in every Furuno km-mode range
+        // table, but the near-multiple-of-50 heuristic below misses it
+        // (125 % 50 == 25). Without this special case it pollutes the
+        // nautical range list on all Furuno models, landing between
+        // 116m (1/16 NM) and 231m (1/8 NM) as a dead zoom step: the
+        // closest-match wire-index lookup then maps 125 back to 116,
+        // leaving the radar stuck at its minimum range.
+        if v == 125 {
+            return true;
+        }
         if v <= 100 {
             Self::near(v, 25)
         } else if v <= 750 {
@@ -434,5 +444,94 @@ impl RangeDetection {
                 return RangeDetectionResult::Complete(self.ranges.clone(), self.saved_range);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Range;
+
+    // All Furuno range tables must classify correctly. A regression here
+    // pollutes the per-unit range list and produces a dead zoom step in the
+    // GUI at whichever boundary the misclassified value lands.
+
+    const DRS_NXT_NM: &[i32] = &[
+        116, 231, 463, 926, 1389, 1852, 2778, 3704, 5556, 7408, 11112, 14816, 22224, 29632, 44448,
+        59264, 66672, 88896,
+    ];
+    const DRS_NXT_EXTENDED_NM: &[i32] = &[
+        116, 231, 463, 926, 1389, 1852, 2778, 3704, 5556, 7408, 11112, 14816, 22224, 29632, 44448,
+        59264, 66672, 88896, 118528, 133344, 177792,
+    ];
+    const DRS_NM: &[i32] = &[
+        116, 231, 463, 926, 1389, 1852, 2778, 3704, 5556, 7408, 11112, 14816, 22224, 29632, 44448,
+        59264, 66672,
+    ];
+    const FAR_NM: &[i32] = &[
+        231, 463, 926, 1389, 1852, 2778, 3704, 5556, 7408, 11112, 14816, 22224, 29632, 44448,
+        59264, 88896, 177792,
+    ];
+    const DRS_NXT_KM: &[i32] = &[
+        125, 250, 500, 750, 1000, 1500, 2000, 3000, 4000, 6000, 8000, 12000, 16000, 24000, 32000,
+        36000, 48000, 64000,
+    ];
+    const DRS_NXT_EXTENDED_KM: &[i32] = &[
+        125, 250, 500, 750, 1000, 1500, 2000, 3000, 4000, 6000, 8000, 12000, 16000, 24000, 32000,
+        36000, 48000, 64000, 96000, 120000, 160000,
+    ];
+    const DRS_KM: &[i32] = &[
+        125, 250, 500, 750, 1000, 1500, 2000, 3000, 4000, 6000, 8000, 12000, 16000, 24000, 32000,
+        36000, 48000, 64000, 72000, 96000,
+    ];
+    const FAR_KM: &[i32] = &[
+        125, 250, 500, 750, 1000, 1500, 2000, 3000, 4000, 6000, 8000, 12000, 16000, 24000, 32000,
+        48000, 96000,
+    ];
+
+    fn assert_all_nautical(table: &[i32], name: &str) {
+        for &v in table {
+            assert!(
+                !Range::is_metric_distance(v),
+                "{}: {}m should be nautical, was classified as metric",
+                name,
+                v
+            );
+        }
+    }
+
+    fn assert_all_metric(table: &[i32], name: &str) {
+        for &v in table {
+            assert!(
+                Range::is_metric_distance(v),
+                "{}: {}m should be metric, was classified as nautical",
+                name,
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn nautical_tables_classify_as_nautical() {
+        assert_all_nautical(DRS_NXT_NM, "DRS_NXT_NM");
+        assert_all_nautical(DRS_NXT_EXTENDED_NM, "DRS_NXT_EXTENDED_NM");
+        assert_all_nautical(DRS_NM, "DRS_NM");
+        assert_all_nautical(FAR_NM, "FAR_NM");
+    }
+
+    #[test]
+    fn metric_tables_classify_as_metric() {
+        assert_all_metric(DRS_NXT_KM, "DRS_NXT_KM");
+        assert_all_metric(DRS_NXT_EXTENDED_KM, "DRS_NXT_EXTENDED_KM");
+        assert_all_metric(DRS_KM, "DRS_KM");
+        assert_all_metric(FAR_KM, "FAR_KM");
+    }
+
+    #[test]
+    fn regression_125m_classifies_as_metric() {
+        // Without the explicit special case in metric(), 125 % 50 == 25 and
+        // the near-multiple-of-50 heuristic misclassifies 125m as nautical,
+        // pushing it between 116m and 231m in the nautical range list and
+        // producing a dead zoom step at the 1/16 NM minimum.
+        assert!(Range::is_metric_distance(125));
     }
 }
