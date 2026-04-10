@@ -52,7 +52,8 @@ Keep commits small and atomic - one logical change per commit. Split unrelated c
 Before opening a PR:
 
 - Branch from latest `master`
-- Run `cargo test` - all checks must pass
+- Run `cargo test` - all tests must pass
+- If `cr` (CodeRabbit CLI) is available, run `cr review --plain` and address any findings before creating the PR
 - Rebase and clean up commit history (squash intermediate commits)
 - Self-review your changes
 - **NEVER change version numbers** - maintainers will update versions when publishing releases
