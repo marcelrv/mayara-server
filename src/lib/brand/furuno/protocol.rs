@@ -44,8 +44,14 @@ pub const SPOKES: usize = 8192;
 /// round upper bound that accommodates all known Furuno models.
 pub const SPOKE_LEN: usize = 1024;
 
-/// Number of colors in the echo palette.
-pub const PIXEL_VALUES: u8 = 64;
+/// Number of echo intensity levels in the palette.
+///
+/// Encoding 3 uses 8-bit values with the two LSBs as a marker field, so the
+/// maximum literal value is 0xFC = 252. Raw echo bytes pass straight through
+/// to the palette — no shift, no gain. The `default_legend()` function may
+/// cap the effective palette size if reserved slots (ARPA, Doppler, history)
+/// would push the total beyond 255.
+pub const PIXEL_VALUES: u8 = 252;
 
 // =============================================================================
 // Network — ports and addresses
@@ -242,6 +248,18 @@ impl RadarModel {
             _ => RadarModel::Unknown,
         }
     }
+
+    /// Whether this model belongs to the DRS-NXT family and supports the
+    /// Tile echo format via `ImoEchoSwitch`.
+    pub(crate) fn is_nxt(&self) -> bool {
+        matches!(
+            self,
+            RadarModel::DRS4DNXT
+                | RadarModel::DRS6ANXT
+                | RadarModel::DRS12ANXT
+                | RadarModel::DRS25ANXT
+        )
+    }
 }
 
 // =============================================================================
@@ -379,6 +397,11 @@ pub enum CommandId {
     WakeUpCount = 0xAC,
     /// `0xAF` — ARPA subsystem alarm/status bitmask: `$NAF,<bits>`.
     ArpaAlarm = 0xAF,
+
+    /// `0xB8` — IMO/Tile echo format switch (NXT only).
+    /// `$SB8,1` = request Tile format, `$SB8,0` = request IMO format.
+    /// From firmware `rmMakeComImoEchoSwitch` at libNAVNETDLL.so.
+    ImoEchoSwitch = 0xB8,
 
     /// `0xD2` — STC range.
     STCRange = 0xD2,
@@ -604,16 +627,23 @@ pub const ENCODING_3_REPEAT_DEFAULT: usize = 0x40;
 /// `used = (used + 3) & SPOKE_ALIGNMENT_MASK`.
 pub const SPOKE_ALIGNMENT_MASK: usize = !3;
 
+/// Minimum palette index for non-zero echo values. Skips the dimmest
+/// indices so weak returns are visually distinct from transparent black.
+pub const ECHO_FLOOR: u16 = 10;
+
 // =============================================================================
-// Echo processing
+// Tile echo format (NXT only)
 // =============================================================================
 
-/// Software echo gain for low-power radars (DRS4W 2.2 kW, DRS).
-/// Applied as a multiplier before the `>> 2` palette shift.
-pub const ECHO_GAIN_LOW_POWER: u8 = 2;
+/// Bits 29-31 of the first header word must equal this value for a Tile frame.
+pub const TILE_MAGIC: u32 = 2;
 
-/// Software echo gain for full-power radars (NXT, FAR).
-pub const ECHO_GAIN_DEFAULT: u8 = 1;
+/// Tile echo format uses a hardcoded scale of 496 at all ranges.
+/// From `DecodeTileEchoFormat` in libNAVNETDLL.so (Ghidra decompilation).
+pub const TILE_SCALE: u32 = 496;
+
+/// Tile RLE: a zero repeat count (low 7 bits) means 128 repeats.
+pub const TILE_REPEAT_DEFAULT: usize = 128;
 
 // =============================================================================
 // Guard zone constants

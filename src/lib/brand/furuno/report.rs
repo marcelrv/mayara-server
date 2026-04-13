@@ -13,12 +13,12 @@ use tokio_graceful_shutdown::SubsystemHandle;
 
 use super::command::Command;
 use super::protocol::{
-    CommandId, DATA_BROADCAST_ADDRESS, ECHO_GAIN_DEFAULT, ECHO_GAIN_LOW_POWER,
-    ENCODING_1_REPEAT_DEFAULT, ENCODING_3_REPEAT_DEFAULT, FRAME_DUAL_RANGE_BIT,
-    FRAME_ENCODING_MASK, FRAME_ENCODING_SHIFT, FRAME_HEADING_VALID_BIT, FRAME_MAGIC,
-    FRAME_SCALE_HIGH_MASK, FRAME_SPOKE_DATA_LEN_HIGH_BIT, FRAME_SWEEP_LEN_HIGH_MASK,
-    FRAME_WIRE_INDEX_MASK, RadarModel, SPOKE_ALIGNMENT_MASK, SPOKE_ANGLE_HIGH_MASK, SPOKE_LEN,
-    SPOKES, WIRE_UNIT_KM, WIRE_UNIT_NM, wire_index_to_meters_for_unit,
+    CommandId, DATA_BROADCAST_ADDRESS, ECHO_FLOOR, ENCODING_1_REPEAT_DEFAULT,
+    ENCODING_3_REPEAT_DEFAULT, FRAME_DUAL_RANGE_BIT, FRAME_ENCODING_MASK, FRAME_ENCODING_SHIFT,
+    FRAME_HEADING_VALID_BIT, FRAME_MAGIC, FRAME_SCALE_HIGH_MASK, FRAME_SPOKE_DATA_LEN_HIGH_BIT,
+    FRAME_SWEEP_LEN_HIGH_MASK, FRAME_WIRE_INDEX_MASK, PIXEL_VALUES, RadarModel,
+    SPOKE_ALIGNMENT_MASK, SPOKE_ANGLE_HIGH_MASK, SPOKE_LEN, SPOKES, TILE_MAGIC,
+    TILE_REPEAT_DEFAULT, TILE_SCALE, WIRE_UNIT_KM, WIRE_UNIT_NM, wire_index_to_meters_for_unit,
 };
 use super::settings;
 use crate::Cli;
@@ -214,6 +214,11 @@ impl FurunoReportReceiver {
                                     }
                                     first_report_received = true;
                                 }
+
+                                // NXT models support Tile echo format via ImoEchoSwitch (0xB8).
+                                // Not auto-switched: the DRS4D-NXT (fw v01.05) acknowledges
+                                // but does not change format. The user can experiment via the
+                                // EchoFormat control; process_frame() detects and decodes Tile.
                             }
                             line.clear();
                         }
@@ -1028,8 +1033,22 @@ impl FurunoReportReceiver {
     }
 
     fn process_frame(&mut self, data: &[u8]) {
-        if data.len() < 16 || data[0] != FRAME_MAGIC {
-            log::debug!("Dropping invalid frame");
+        if data.len() < 16 {
+            log::debug!("Dropping short frame ({} bytes)", data.len());
+            return;
+        }
+
+        // Tile echo format: first uint32 bits 29-31 == TILE_MAGIC (2)
+        if data.len() >= 12 {
+            let header_word = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+            if (header_word >> 29) == TILE_MAGIC {
+                self.process_tile_frame(data);
+                return;
+            }
+        }
+
+        if data[0] != FRAME_MAGIC {
+            log::debug!("Dropping invalid frame (magic={:#04x})", data[0]);
             return;
         }
 
@@ -1116,17 +1135,6 @@ impl FurunoReportReceiver {
                 SPOKE_LEN,
             );
 
-            // Low-power radars (DRS4W: 2.2 kW WiFi) produce raw echo values
-            // well below the encoding maximum (~124 vs 252), so the 64-color
-            // palette is only half-utilised and targets appear uniformly blue.
-            // A software gain of 2× doubles the palette spread without
-            // affecting full-power models (NXT, FAR) where values already
-            // reach the encoding ceiling.
-            let echo_gain: u8 = match self.model {
-                RadarModel::DRS4W | RadarModel::DRS => ECHO_GAIN_LOW_POWER,
-                _ => ECHO_GAIN_DEFAULT,
-            };
-
             if is_range_b {
                 Self::add_spoke_to_common(
                     self.common_b.as_mut().unwrap(),
@@ -1134,7 +1142,6 @@ impl FurunoReportReceiver {
                     angle,
                     heading,
                     &send_spoke,
-                    echo_gain,
                 );
             } else {
                 Self::add_spoke_to_common(
@@ -1143,7 +1150,6 @@ impl FurunoReportReceiver {
                     angle,
                     heading,
                     &send_spoke,
-                    echo_gain,
                 );
             }
 
@@ -1156,6 +1162,154 @@ impl FurunoReportReceiver {
         } else {
             self.common.send_spoke_message();
         }
+    }
+
+    /// Decode a Tile echo frame (NXT-only format).
+    ///
+    /// The Tile format uses bitstream-packed headers and a different RLE scheme
+    /// from IMO. Each frame contains one or more spoke strips (64 or 256 cells).
+    /// The literal pixel encoding uses a bit-twist:
+    /// `decoded = (byte & 0x7F) >> 1 | (byte & 1) << 7`.
+    ///
+    /// Reference: `DecodeTileEchoFormat` @ 0x5eda0 in libNAVNETDLL.so.
+    fn process_tile_frame(&mut self, data: &[u8]) {
+        if data.len() < 24 {
+            log::debug!("Tile frame too short ({} bytes)", data.len());
+            return;
+        }
+
+        // First header word at byte offset 8
+        let header_word = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        let content_length = (header_word & 0x7FF) as usize; // bits 0-10
+
+        // Dual range ID: check byte 15 bit 6, same position as IMO format.
+        // If this turns out wrong for Tile, we fall back to Range A only.
+        let radar_no = (data[15] >> 6) & 0x01;
+        let is_range_b = radar_no == 1 && self.common_b.is_some();
+        let range_idx = if is_range_b { 1 } else { 0 };
+
+        // Tile frames don't participate in IMO delta decoding. Clear the
+        // previous-spoke history so a switch back to IMO starts fresh.
+        self.prev_spoke[range_idx].clear();
+
+        // Read range from the correct control state (A or B) since Tile
+        // format doesn't carry wire_index in its header like IMO does.
+        let range_controls = if is_range_b {
+            &self.common_b.as_ref().unwrap().info.controls
+        } else {
+            &self.common.info.controls
+        };
+        let range = range_controls
+            .get(&ControlId::Range)
+            .and_then(|c| c.value)
+            .unwrap_or(0.0) as u32;
+
+        if is_range_b {
+            self.common_b.as_mut().unwrap().new_spoke_message();
+        } else {
+            self.common.new_spoke_message();
+        }
+
+        // Per-spoke records start after the header words (byte offset 24).
+        // The firmware loop condition is `offset <= content_length + 7` where
+        // offset starts at 8, so content_length + 7 is the frame boundary.
+        let mut pos: usize = 24;
+        let frame_end = (content_length + 7).min(data.len());
+
+        while pos + 4 <= frame_end {
+            // Per-spoke sub-header: angle, heading/flags, first pixel + strip size
+            let angle = ((data[pos] as u16) | ((data[pos + 1] as u16 & 0x1F) << 8)) as u16;
+            let heading = ((data[pos + 2] as u16) | ((data[pos + 3] as u16 & 0x1F) << 8)) as u16;
+            pos += 4;
+
+            if pos >= frame_end {
+                break;
+            }
+
+            let flag = data[pos];
+            pos += 1;
+            let pixel_count = if flag & 0x80 != 0 { 256 } else { 64 };
+
+            // First pixel is a bit-twisted literal from `flag` bits 0-6
+            let first_pixel = Self::tile_literal(flag);
+            let mut spoke = Vec::with_capacity(pixel_count);
+            spoke.push(first_pixel);
+
+            // Decode remaining pixels via Tile RLE
+            while spoke.len() < pixel_count && pos < frame_end {
+                let byte = data[pos];
+                pos += 1;
+
+                if byte & 0x80 == 0 {
+                    spoke.push(Self::tile_literal(byte));
+                } else {
+                    // RLE: repeat previous value
+                    let mut count = (byte & 0x7F) as usize;
+                    if count == 0 {
+                        count = TILE_REPEAT_DEFAULT;
+                    }
+                    let prev = *spoke.last().unwrap_or(&0);
+                    for _ in 0..count {
+                        if spoke.len() >= pixel_count {
+                            break;
+                        }
+                        spoke.push(prev);
+                    }
+                }
+            }
+
+            // Pad to TILE_SCALE samples: the first pixel_count are echo data,
+            // the rest are zero (outside display range), matching IMO's scale
+            // semantics where only the first `scale` samples cover 0..range.
+            spoke.resize(TILE_SCALE as usize, 0);
+
+            let send_spoke = Self::stretch_spoke(&spoke, TILE_SCALE as usize, SPOKE_LEN);
+
+            let metadata = FurunoSpokeMetadata {
+                sweep_count: 1,
+                sweep_len: pixel_count as u32,
+                encoding: 0,
+                have_heading: 1,
+                range,
+                radar_no,
+                scale: TILE_SCALE,
+            };
+
+            if is_range_b {
+                Self::add_spoke_to_common(
+                    self.common_b.as_mut().unwrap(),
+                    &metadata,
+                    angle,
+                    heading,
+                    &send_spoke,
+                );
+            } else {
+                Self::add_spoke_to_common(
+                    &mut self.common,
+                    &metadata,
+                    angle,
+                    heading,
+                    &send_spoke,
+                );
+            }
+
+            self.prev_angle[range_idx] = angle;
+        }
+
+        if is_range_b {
+            self.common_b.as_mut().unwrap().send_spoke_message();
+        } else {
+            self.common.send_spoke_message();
+        }
+    }
+
+    /// Decode a Tile-format bit-twisted literal: rotates bit 0 to bit 7.
+    /// Only 7 input bits are used (bit 7 is the RLE marker), so the output
+    /// has bit 6 always zero — max value is 191, giving 128 distinct levels.
+    /// This is inherent to the Tile wire format, not a bug.
+    #[inline]
+    fn tile_literal(byte: u8) -> u8 {
+        (byte & 0x7F) >> 1 | (byte & 1) << 7
     }
 
     fn decode_sweep_encoding_0(sweep: &[u8]) -> (Vec<u8>, usize) {
@@ -1304,7 +1458,6 @@ impl FurunoReportReceiver {
         angle: SpokeBearing,
         heading: SpokeBearing,
         sweep: &[u8],
-        echo_gain: u8,
     ) {
         if common.replay {
             let _ = common
@@ -1325,21 +1478,23 @@ impl FurunoReportReceiver {
             heading.map(|h| (h * SPOKES as f64 / TAU) as u16)
         };
 
-        let pixel_max = common.info.pixel_values.saturating_sub(1) as u16;
+        let pixel_max = common.info.pixel_colors().saturating_sub(1) as u16;
         let mut data = vec![0; sweep.len()];
 
+        // Furuno-specific: lift weak echoes so they are visually distinct from
+        // black. With 219 palette entries the linear blue ramp has ~72 levels,
+        // making raw values 1-20 near-invisible. Map the raw 0-252 range into
+        // a narrower palette window that skips the dimmest indices.
+        // Index 0 stays transparent; everything else starts at ECHO_FLOOR.
+        let usable = pixel_max.saturating_sub(ECHO_FLOOR);
+
         for (i, b) in sweep.iter().enumerate() {
-            // Map raw echo byte to palette index. The raw value range depends
-            // on the encoding (max 252 for encoding 3, 254 for encoding 1/2).
-            // Low-power radars (DRS4W: 2.2 kW) produce values well below the
-            // hardware maximum, so echo_gain > 1 applies software amplification
-            // before the palette mapping. Clamped to pixel_max (63 for the
-            // default 64-color palette).
-            let amplified = (*b as u16 * echo_gain as u16) >> 2;
-            data[i] = amplified.min(pixel_max) as u8;
-        }
-        if common.replay {
-            data[sweep.len() - 1] = 64;
+            let raw = *b as u16;
+            data[i] = if raw == 0 {
+                0
+            } else {
+                (ECHO_FLOOR + raw * usable / PIXEL_VALUES as u16).min(pixel_max) as u8
+            };
         }
 
         log::trace!(

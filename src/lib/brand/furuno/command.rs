@@ -492,6 +492,10 @@ impl CommandSender for Command {
                 cmd.push(value);
                 CommandId::JammingAble
             }
+            ControlId::EchoFormat => {
+                cmd.push(value);
+                CommandId::ImoEchoSwitch
+            }
             ControlId::Doppler => {
                 // Format: $SEF,{enabled},{mode},0
                 // Target Analyzer: value 0=Off, 1=Target, 2=Rain
