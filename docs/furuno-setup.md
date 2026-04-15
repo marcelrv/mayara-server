@@ -4,7 +4,7 @@ This guide covers network configuration for all Furuno radar families supported 
 
 ## Network Requirements
 
-All Furuno radars (except DRS4W WiFi) communicate on the `172.31.0.0/16` subnet. The machine running Mayara **must** have an IP address on this subnet or the radar will not be detected.
+All Furuno radars communicate on the `172.31.0.0/16` subnet. The machine running Mayara **must** have an IP address on this subnet or the radar will not be detected.
 
 Recommended configuration:
 - IP address: `172.31.3.150` (or any unused address in `172.31.x.x`)
@@ -17,11 +17,27 @@ Mayara's _Network_ page will show a warning if no interface has an address in th
 
 The DRS4W ("1st Watch") creates its own WiFi network. Connect the Mayara machine to the radar's WiFi access point and start Mayara with `--allow-wifi`.
 
+Multiple concurrent clients are allowed; you can use the standard Marine Radar iOS application alongside Mayara.
+
 ## DRS / DRS-NXT Series
 
 DRS radars (DRS4D-NXT, DRS6A-NXT, DRS12A-NXT, DRS25A-NXT, and older DRS/X-Class models) work out of the box once the IP subnet is configured. No mode changes are needed on the radar itself.
 
 The radar broadcasts discovery beacons and Mayara detects the model automatically from the beacon data.
+
+### DRS Model Detection
+
+Mayara identifies DRS models from the 7-digit part code in the `$N96` Modules response:
+
+| Part Code | Model       |
+|-----------|-------------|
+| 0359235   | DRS         |
+| 0359338   | DRS4DL      |
+| 0359367   | DRS4DL      |
+| 0359360   | DRS4DNXT    |
+| 0359329   | DRS4W       |
+| 0359421   | DRS6ANXT    |
+| 0359355   | DRS6AXCLASS |
 
 ## FAR Series (FAR-2xx7, FAR-15x3, FAR-3000)
 
@@ -40,16 +56,17 @@ To change the IMO mode on the FAR-2xx7:
 
 Mayara identifies FAR models from the 7-digit part code in the `$N96` Modules response:
 
-| Part Code | Model |
-|-----------|-------|
-| 0359204 | FAR-21x7 |
-| 0359560 | FAR-21x7 |
-| 0359321 | FAR-14x7 |
-| 0359397 | FAR-14x6 |
-| 0359344 | FAR-15x3 |
-| 0359281 | FAR-3000 |
-| 0359286 | FAR-3000 |
-| 0359477 | FAR-3000 |
+| Part Code | Model    |
+|-----------|----------|
+| 0359397   | FAR-14x6 |
+| 0359255   | FAR-14x7 |
+| 0359321   | FAR-14x7 |
+| 0359344   | FAR-15x3 |
+| 0359204   | FAR-21x7 |
+| 0359560   | FAR-21x7 |
+| 0359281   | FAR-3000 |
+| 0359286   | FAR-3000 |
+| 0359477   | FAR-3000 |
 
 Unrecognized part codes still work with default capabilities. Please report the part code and model so it can be added.
 
