@@ -16,7 +16,7 @@ Mayara's _Network_ page will show a warning if no interface has an address in th
 ### DRS4W WiFi
 
 The DRS4W ("1st Watch") creates its own WiFi network. Connect the Mayara machine to the radar's WiFi access point and start Mayara with `--allow-wifi`.
-Multiple  concurrent clients are allowed, so you can use the IOS application along with the Mayara machine.
+Multiple concurrent clients are allowed, you can use the standard Marine Radar IOS application along with the Mayara machine.
 
 ## DRS / DRS-NXT Series
 
