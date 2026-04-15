@@ -32,12 +32,12 @@ Mayara identifies DRS models from the 7-digit part code in the `$N96` Modules re
 | Part Code | Model       |
 |-----------|-------------|
 | 0359235   | DRS         |
-| 0359329   | DRS4W       |
 | 0359338   | DRS4DL      |
-| 0359355   | DRS6AXCLASS |
-| 0359360   | DRS4DNXT    |
 | 0359367   | DRS4DL      |
+| 0359360   | DRS4DNXT    |
+| 0359329   | DRS4W       |
 | 0359421   | DRS6ANXT    |
+| 0359355   | DRS6AXCLASS |
 
 ## FAR Series (FAR-2xx7, FAR-15x3, FAR-3000)
 
@@ -58,15 +58,15 @@ Mayara identifies FAR models from the 7-digit part code in the `$N96` Modules re
 
 | Part Code | Model    |
 |-----------|----------|
-| 0359204   | FAR-21x7 |
+| 0359397   | FAR-14x6 |
 | 0359255   | FAR-14x7 |
-| 0359281   | FAR-3000 |
-| 0359286   | FAR-3000 |
 | 0359321   | FAR-14x7 |
 | 0359344   | FAR-15x3 |
-| 0359397   | FAR-14x6 |
-| 0359477   | FAR-3000 |
+| 0359204   | FAR-21x7 |
 | 0359560   | FAR-21x7 |
+| 0359281   | FAR-3000 |
+| 0359286   | FAR-3000 |
+| 0359477   | FAR-3000 |
 
 Unrecognized part codes still work with default capabilities. Please report the part code and model so it can be added.
 
