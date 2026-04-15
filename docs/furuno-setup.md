@@ -4,7 +4,7 @@ This guide covers network configuration for all Furuno radar families supported 
 
 ## Network Requirements
 
-All Furuno radars (except DRS4W WiFi) communicate on the `172.31.0.0/16` subnet. The machine running Mayara **must** have an IP address on this subnet or the radar will not be detected.
+All Furuno radars communicate on the `172.31.0.0/16` subnet. The machine running Mayara **must** have an IP address on this subnet or the radar will not be detected.
 
 Recommended configuration:
 - IP address: `172.31.3.150` (or any unused address in `172.31.x.x`)
@@ -16,6 +16,7 @@ Mayara's _Network_ page will show a warning if no interface has an address in th
 ### DRS4W WiFi
 
 The DRS4W ("1st Watch") creates its own WiFi network. Connect the Mayara machine to the radar's WiFi access point and start Mayara with `--allow-wifi`.
+Multiple  concurrent clients are allowed, so you can use the IOS application along with the Mayara machine.
 
 ## DRS / DRS-NXT Series
 
@@ -50,6 +51,7 @@ Mayara identifies FAR models from the 7-digit part code in the `$N96` Modules re
 | 0359281 | FAR-3000 |
 | 0359286 | FAR-3000 |
 | 0359477 | FAR-3000 |
+| 0359329 | DRS4W    |
 
 Unrecognized part codes still work with default capabilities. Please report the part code and model so it can be added.
 
