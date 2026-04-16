@@ -300,3 +300,17 @@ pub(crate) use linux::spawn_wait_for_ip_addr_change;
 pub(crate) use windows::is_wireless_interface;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::spawn_wait_for_ip_addr_change;
+
+// Android stubs - the embedded server doesn't need network monitoring
+#[cfg(target_os = "android")]
+pub(crate) fn is_wireless_interface(_name: &str) -> bool {
+    false
+}
+
+#[cfg(target_os = "android")]
+pub(crate) async fn spawn_wait_for_ip_addr_change(
+    _cancellation_token: tokio_util::sync::CancellationToken,
+    _tx_ip_change: tokio::sync::broadcast::Sender<()>,
+) {
+    // Android embedded server - no-op, network changes are handled differently
+}
