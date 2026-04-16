@@ -25,6 +25,7 @@ pub mod network;
 pub mod protos;
 pub mod radar;
 pub mod recording;
+pub mod server;
 pub mod stream;
 pub mod util;
 
