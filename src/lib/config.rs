@@ -108,8 +108,15 @@ pub(crate) struct Persistence {
 
 impl Persistence {
     pub(crate) fn new() -> Self {
-        if crate::replay::is_active() {
-            debug!("persistence disabled in pcap replay mode");
+        // On Android, directories::ProjectDirs does not work (no HOME / XDG env).
+        // Persistence is also disabled in pcap replay mode.
+        // In both cases return an empty no-op instance so the server starts cleanly.
+        if crate::replay::is_active() || cfg!(target_os = "android") {
+            if cfg!(target_os = "android") && !crate::replay::is_active() {
+                debug!("persistence disabled on Android");
+            } else {
+                debug!("persistence disabled in pcap replay mode");
+            }
             return Persistence {
                 config: Config {
                     radars: HashMap::new(),
@@ -119,6 +126,7 @@ impl Persistence {
             };
         }
 
+        // Non-Android, non-replay: load config from the platform config directory.
         let project_dirs = get_project_dirs();
         let mut settings_path = project_dirs.config_dir().to_owned();
         fs::create_dir_all(&settings_path).expect("Cannot create settings directory");
@@ -139,6 +147,11 @@ impl Persistence {
     }
 
     fn get_file_time(&self) -> SystemTime {
+        // Empty path means persistence is disabled (pcap replay or Android).
+        if self.path.as_os_str().is_empty() {
+            return SystemTime::UNIX_EPOCH;
+        }
+
         let metadata = fs::metadata(&self.path);
 
         match metadata {
