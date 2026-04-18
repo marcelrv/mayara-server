@@ -372,7 +372,20 @@ impl NavigationData {
     ) -> Result<Stream, RadarError> {
         let mut known_addresses: HashSet<SocketAddr> = HashSet::new();
 
-        let mdns = ServiceDaemon::new().expect("Failed to create daemon");
+        let mdns = match ServiceDaemon::new() {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!(
+                    "{} mDNS daemon unavailable ({}), navigation data disabled",
+                    self.what,
+                    e
+                );
+                // Wait for shutdown rather than propagating an error that would
+                // kill the whole server (e.g. on Android where mDNS may be restricted).
+                subsys.on_shutdown_requested().await;
+                return Err(RadarError::Shutdown);
+            }
+        };
 
         if interface.is_some() {
             let _ = mdns.disable_interface(IfKind::All);
@@ -385,10 +398,14 @@ impl NavigationData {
                 .clone();
             let _ = mdns.enable_interface(IfKind::Name(navigation_address));
         }
-        let tcp_locator = mdns.browse(self.service_name).expect(&format!(
-            "Failed to browse for {} service",
-            self.service_name
-        ));
+        let tcp_locator = match mdns.browse(self.service_name) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("{} mDNS browse failed: {}, navigation data disabled", self.what, e);
+                subsys.on_shutdown_requested().await;
+                return Err(RadarError::Shutdown);
+            }
+        };
 
         log::debug!("SignalK find_service (re)start");
 
